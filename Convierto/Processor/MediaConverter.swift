@@ -68,20 +68,24 @@ actor MediaConverter {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = format.fileType
         
-        // Create a separate task for progress monitoring
-        let progressTask = Task.detached {
-            repeat {
+        // Use a separate task for progress monitoring
+        let progressTask = Task.detached { [weak exportSession] in
+            while let session = exportSession, !Task.isCancelled {
                 await MainActor.run {
-                    progressHandler(exportSession.progress)
+                    progressHandler(session.progress)
                 }
                 try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
-            } while !Task.isCancelled && exportSession.status == .exporting
+                
+                if session.status != .exporting {
+                    break
+                }
+            }
         }
         
         defer { progressTask.cancel() }
         
         // Perform the export
-        return try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { continuation in
             exportSession.exportAsynchronously {
                 switch exportSession.status {
                 case .completed:

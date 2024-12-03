@@ -7,7 +7,7 @@ struct FileProcessingState: Identifiable {
     let url: URL
     let originalFileName: String
     var progress: Double
-    var result: FileProcessor.ProcessingResult?
+    var result: ProcessingResult?
     var isProcessing: Bool
     var error: Error?
     
@@ -39,7 +39,7 @@ class MultiFileProcessor: ObservableObject {
     @Published var selectedOutputFormat: UTType = .jpeg
     @Published var progress: Double = 0
     @Published var isProcessing: Bool = false
-    @Published var processingResult: FileProcessor.ProcessingResult?
+    @Published var processingResult: ProcessingResult?
     private var processingTasks: [UUID: Task<Void, Never>] = [:]
     
     func addFiles(_ urls: [URL]) {
@@ -101,16 +101,17 @@ class MultiFileProcessor: ObservableObject {
         }
     }
     
+    @MainActor
     private func processFileInternal(with id: UUID) async {
+        guard let fileState = files.first(where: { $0.id == id }) else { return }
         guard let index = files.firstIndex(where: { $0.id == id }) else { return }
         
-        isProcessing = true
         files[index].isProcessing = true
         files[index].progress = 0
         
         do {
             let processor = FileProcessor()
-            try await processor.processFile(files[index].url, outputFormat: selectedOutputFormat)
+            try await processor.processFile(fileState.url, outputFormat: selectedOutputFormat)
             if let result = processor.processingResult {
                 files[index].result = result
                 files[index].progress = 1.0
@@ -129,12 +130,15 @@ class MultiFileProcessor: ObservableObject {
         panel.canCreateDirectories = true
         panel.showsTagField = false
         
+        // Get the suggested filename with the correct extension
         let originalURL = URL(fileURLWithPath: originalName)
         let filenameWithoutExt = originalURL.deletingPathExtension().lastPathComponent
-        let fileExtension = originalURL.pathExtension
-        panel.nameFieldStringValue = "\(filenameWithoutExt)_converted.\(fileExtension)"
+        let newExtension = selectedOutputFormat.preferredFilenameExtension ?? "converted"
+        let suggestedFilename = "\(filenameWithoutExt)_converted.\(newExtension)"
         
+        panel.nameFieldStringValue = suggestedFilename
         panel.message = "Choose where to save the converted file"
+        panel.allowedContentTypes = [selectedOutputFormat]
         
         guard let window = NSApp.windows.first else { return }
         

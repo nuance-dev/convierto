@@ -9,14 +9,21 @@ struct FormatSelectorView: View {
     let onOutputFormatSelected: (UTType) -> Void
     
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 20) {
             if let inputFormat = selectedInputFormat {
                 // Input format pill
                 InputFormatPill(format: inputFormat)
                 
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.secondary)
+                // Arrow with animation
+                Image(systemName: "arrow.forward")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(
+                        .linearGradient(
+                            colors: [.secondary.opacity(0.8), .secondary.opacity(0.6)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
             }
             
             // Output format selector
@@ -33,18 +40,32 @@ struct InputFormatPill: View {
     let format: UTType
     
     var body: some View {
-        HStack {
+        HStack(spacing: 8) {
             Image(systemName: getFormatIcon(for: format))
-                .foregroundColor(.secondary)
+                .foregroundStyle(
+                    .linearGradient(
+                        colors: [.secondary.opacity(0.8), .secondary.opacity(0.6)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .font(.system(size: 14, weight: .medium))
+            
             Text(format.localizedDescription ?? "Unknown Format")
                 .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.primary.opacity(0.8))
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
         .background(
-            Capsule()
-                .fill(Color(NSColor.controlBackgroundColor))
-                .opacity(0.8)
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(NSColor.controlBackgroundColor))
+                    .opacity(0.4)
+                
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+            }
         )
     }
 }
@@ -54,16 +75,30 @@ struct OutputFormatSelector: View {
     let supportedTypes: [String: [UTType]]
     let onFormatSelected: (UTType) -> Void
     
+    @State private var isHovered = false
+    @State private var isMenuOpen = false
+    
     var body: some View {
         Menu {
             ForEach(supportedTypes.keys.sorted(), id: \.self) { category in
-                Menu(category) {
+                Section(header: Text(category).foregroundColor(.secondary)) {
                     ForEach(supportedTypes[category] ?? [], id: \.identifier) { format in
-                        Button(action: { onFormatSelected(format) }) {
+                        Button(action: {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                onFormatSelected(format)
+                            }
+                        }) {
                             HStack {
+                                Image(systemName: getFormatIcon(for: format))
+                                    .foregroundColor(format == selectedOutputFormat ? .accentColor : .secondary)
+                                    .font(.system(size: 14))
                                 Text(format.localizedDescription ?? "Unknown Format")
+                                    .font(.system(size: 14))
                                 if format == selectedOutputFormat {
+                                    Spacer()
                                     Image(systemName: "checkmark")
+                                        .foregroundColor(.accentColor)
+                                        .font(.system(size: 12, weight: .bold))
                                 }
                             }
                         }
@@ -71,26 +106,54 @@ struct OutputFormatSelector: View {
                 }
             }
         } label: {
-            HStack {
+            HStack(spacing: 8) {
                 Image(systemName: getFormatIcon(for: selectedOutputFormat))
-                    .foregroundColor(.accentColor)
+                    .foregroundStyle(
+                        .linearGradient(
+                            colors: [.accentColor, .accentColor.opacity(0.8)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .font(.system(size: 14, weight: .medium))
+                
                 Text(selectedOutputFormat.localizedDescription ?? "Unknown format")
                     .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.primary.opacity(0.9))
+                
                 Image(systemName: "chevron.down")
                     .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary.opacity(0.8))
+                    .rotationEffect(.degrees(isMenuOpen ? 180 : 0))
+                    .animation(.spring(response: 0.2), value: isMenuOpen)
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color(NSColor.controlBackgroundColor))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
-                    )
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color(NSColor.controlBackgroundColor))
+                        .opacity(0.4)
+                    
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(
+                            isHovered ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.1),
+                            lineWidth: 1
+                        )
+                }
             )
+            .scaleEffect(isHovered ? 1.01 : 1.0)
+            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
         }
         .menuStyle(BorderlessButtonMenuStyle())
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .onChange(of: isMenuOpen) { oldValue, newValue in
+            withAnimation {
+                isHovered = newValue
+            }
+        }
     }
 }
 
@@ -101,59 +164,132 @@ struct ContentView: View {
     @State private var alertMessage = ""
     @State private var selectedInputFormat: UTType?
     @State private var selectedOutputFormat: UTType = .jpeg
+    @State private var isHovering = false
     
     let supportedTypes: [String: [UTType]] = [
-        "Images": [.jpeg, .tiff, .png, .heic, .gif, .bmp, .webP, .svg, .rawImage],
-        "Video": [.mpeg4Movie, .movie, .avi, .mpeg2Video, .quickTimeMovie],
-        "Audio": [.mpeg4Audio, .mp3, .wav, .aiff]
+        "Images": [.jpeg, .tiff, .png, .heic, .gif, .bmp, .webP],
+        "Video": [.mpeg4Movie, .quickTimeMovie, .avi],
+        "Audio": [.mpeg4Audio, .mp3, .wav, .aiff],
+        "Documents": [.pdf]
     ]
     
     var body: some View {
         ZStack {
-            VisualEffectBlur(material: .headerView, blendingMode: .behindWindow)
+            // Background
+            Color(NSColor.windowBackgroundColor)
+                .opacity(0.8)
                 .ignoresSafeArea()
             
-            VStack(spacing: 20) {
+            VStack(spacing: 24) {
                 if processor.isProcessing {
                     ProcessingView(progress: processor.progress)
+                        .transition(.opacity)
                 } else if let result = processor.processingResult {
                     ResultView(result: result) {
                         Task {
-                            await saveConvertedFile(url: result.outputURL, originalName: result.fileName)
+                            await processor.saveConvertedFile(url: result.outputURL, originalName: result.originalFileName)
                         }
                     } onReset: {
-                        processor.processingResult = nil
-                        processor.progress = 0
-                    }
-                } else if !processor.files.isEmpty {
-                    MultiFileView(
-                        processor: processor,
-                        supportedTypes: supportedTypes.values.flatMap { $0 }
-                    )
-                } else {
-                    VStack(spacing: 24) {
-                        FormatSelectorView(
-                            selectedInputFormat: selectedInputFormat,
-                            selectedOutputFormat: selectedOutputFormat,
-                            supportedTypes: supportedTypes,
-                            onOutputFormatSelected: { selectedOutputFormat = $0 }
-                        )
-                        
-                        ZStack {
-                            DropZoneView(
-                                isDragging: $isDragging,
-                                selectedFormat: $selectedOutputFormat,
-                                onTap: selectFiles
-                            )
+                        withAnimation(.spring(response: 0.3)) {
+                            processor.processingResult = nil
+                            processor.progress = 0
                         }
                     }
+                    .transition(.opacity)
+                } else {
+                    // Main conversion interface
+                    VStack(spacing: 32) {
+                        // Format selector
+                        HStack(spacing: 16) {
+                            if let inputFormat = selectedInputFormat {
+                                FormatPill(format: inputFormat, isInput: true)
+                            }
+                            
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .opacity(selectedInputFormat != nil ? 1 : 0)
+                            
+                            OutputFormatSelector(
+                                selectedOutputFormat: selectedOutputFormat,
+                                supportedTypes: supportedTypes,
+                                onFormatSelected: { selectedOutputFormat = $0 }
+                            )
+                        }
+                        .padding(.top, 8)
+                        
+                        // Drop zone
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 24)
+                                .fill(Color(NSColor.controlBackgroundColor).opacity(0.4))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 24)
+                                        .strokeBorder(
+                                            LinearGradient(
+                                                colors: [
+                                                    .accentColor.opacity(isDragging ? 0.3 : 0.1),
+                                                    .accentColor.opacity(isDragging ? 0.2 : 0.05)
+                                                ],
+                                                startPoint: .top,
+                                                endPoint: .bottom
+                                            ),
+                                            lineWidth: 1
+                                        )
+                                )
+                                .shadow(
+                                    color: .accentColor.opacity(isDragging ? 0.1 : 0),
+                                    radius: 8,
+                                    y: 4
+                                )
+                            
+                            VStack(spacing: 16) {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color.accentColor.opacity(0.1))
+                                        .frame(width: 64, height: 64)
+                                    
+                                    Image(systemName: isDragging ? "arrow.down.circle.fill" : "square.and.arrow.up.circle.fill")
+                                        .font(.system(size: 32, weight: .medium))
+                                        .foregroundStyle(
+                                            LinearGradient(
+                                                colors: [.accentColor, .accentColor.opacity(0.8)],
+                                                startPoint: .top,
+                                                endPoint: .bottom
+                                            )
+                                        )
+                                        .symbolEffect(.bounce, value: isDragging)
+                                }
+                                
+                                VStack(spacing: 8) {
+                                    Text(isDragging ? "Release to Convert" : "Drop Files Here")
+                                        .font(.system(size: 16, weight: .medium))
+                                    
+                                    if !isDragging {
+                                        Text("or click to browse")
+                                            .font(.system(size: 14))
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                            .padding(40)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: selectFiles)
+                        .onDrop(of: [.fileURL], isTargeted: $isDragging) { providers -> Bool in
+                            handleDrop(providers: providers)
+                            return true
+                        }
+                    }
+                    .padding(24)
                 }
             }
-            .padding(24)
+            .frame(minWidth: 480, minHeight: 360)
         }
-        .frame(minWidth: 400, minHeight: 300)
-        .alert(isPresented: $showAlert) {
-            Alert(title: Text("Error"), message: Text(alertMessage), dismissButton: .default(Text("OK")))
+        .alert("Conversion Error", isPresented: $showAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(alertMessage)
         }
     }
     
@@ -161,62 +297,83 @@ struct ContentView: View {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = supportedTypes.values.flatMap { $0 }
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = Array(supportedTypes.values.flatMap { $0 })
         
-        if panel.runModal() == .OK {
-            handleSelectedFiles(panel.urls)
+        panel.begin { response in
+            if response == .OK {
+                Task {
+                    await handleSelectedFiles(panel.urls)
+                }
+            }
         }
     }
     
-    private func handleSelectedFiles(_ urls: [URL]) {
-        processor.addFiles(urls)
+    private func handleDrop(providers: [NSItemProvider]) {
+        Task { @MainActor in
+            var urls: [URL] = []
+            
+            for provider in providers {
+                if let url = try? await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) as? URL {
+                    urls.append(url)
+                }
+            }
+            
+            await handleSelectedFiles(urls)
+        }
     }
     
-    private func saveConvertedFile(url: URL, originalName: String) async {
-        await processor.saveConvertedFile(url: url, originalName: originalName)
+    private func handleSelectedFiles(_ urls: [URL]) async {
+        guard let url = urls.first else { return }
+        
+        do {
+            let type = try await url.resourceValues(forKeys: [.contentTypeKey]).contentType ?? .item
+            selectedInputFormat = type
+            
+            // Auto-select appropriate output format
+            if let category = supportedTypes.first(where: { entry in
+                entry.value.contains { type.conforms(to: $0) }
+            }) {
+                selectedOutputFormat = category.value.first ?? .jpeg
+            }
+            
+            let processor = FileProcessor()
+            try await processor.processFile(url, outputFormat: selectedOutputFormat)
+        } catch {
+            alertMessage = error.localizedDescription
+            showAlert = true
+        }
     }
 }
 
-struct ProcessingView: View {
-    let progress: Double
+struct FormatPill: View {
+    let format: UTType
+    let isInput: Bool
     
     var body: some View {
-        VStack(spacing: 24) {
-            // Progress Circle
-            ZStack {
-                Circle()
-                    .stroke(Color.secondary.opacity(0.2), lineWidth: 4)
-                    .frame(width: 60, height: 60)
-                
-                Circle()
-                    .trim(from: 0, to: progress)
-                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 4, lineCap: .round))
-                    .frame(width: 60, height: 60)
-                    .rotationEffect(.degrees(-90))
-                
-                Text("\(Int(progress * 100))%")
-                    .font(.system(size: 14, weight: .medium))
-            }
+        HStack(spacing: 8) {
+            Image(systemName: getFormatIcon(for: format))
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(isInput ? .secondary : .accentColor)
             
-            VStack(spacing: 8) {
-                Text("Converting File")
-                    .font(.system(size: 16, weight: .semibold))
-                Text("Almost there...")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary)
-            }
+            Text(format.localizedDescription ?? "Unknown Format")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.primary.opacity(0.8))
         }
-        .frame(maxWidth: 320)
-        .padding(32)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color(NSColor.windowBackgroundColor))
-                .opacity(0.8)
-                .shadow(color: Color.black.opacity(0.1), radius: 20, x: 0, y: 10)
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(NSColor.controlBackgroundColor))
+                    .opacity(0.4)
+                
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+            }
         )
     }
 }
-
 func getFormatIcon(for format: UTType) -> String {
     if format.conforms(to: .image) {
         return "photo"
