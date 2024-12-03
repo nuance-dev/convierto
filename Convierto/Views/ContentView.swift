@@ -4,34 +4,41 @@ import AppKit
 
 struct FormatSelectorView: View {
     let selectedInputFormat: UTType?
-    let selectedOutputFormat: UTType
+    @Binding var selectedOutputFormat: UTType
     let supportedTypes: [String: [UTType]]
-    let onOutputFormatSelected: (UTType) -> Void
+    @State private var showError = false
+    @State private var errorMessage: String?
     
     var body: some View {
         HStack(spacing: 20) {
             if let inputFormat = selectedInputFormat {
-                // Input format pill
                 InputFormatPill(format: inputFormat)
                 
-                // Arrow with animation
                 Image(systemName: "arrow.forward")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(
-                        .linearGradient(
-                            colors: [.secondary.opacity(0.8), .secondary.opacity(0.6)],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
+                    .foregroundStyle(.secondary)
             }
             
-            // Output format selector
             OutputFormatSelector(
-                selectedOutputFormat: selectedOutputFormat,
+                selectedOutputFormat: $selectedOutputFormat,
                 supportedTypes: supportedTypes,
-                onFormatSelected: onOutputFormatSelected
+                showError: showError,
+                errorMessage: errorMessage
             )
+        }
+        .onChange(of: selectedOutputFormat) { oldValue, newValue in
+            validateFormatCompatibility(input: selectedInputFormat, output: newValue)
+        }
+    }
+    
+    private func validateFormatCompatibility(input: UTType?, output: UTType) {
+        guard let input = input else { return }
+        
+        let isCompatible = checkFormatCompatibility(input: input, output: output)
+        
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showError = !isCompatible
+            errorMessage = isCompatible ? nil : "Cannot convert between these formats"
         }
     }
 }
@@ -71,9 +78,10 @@ struct InputFormatPill: View {
 }
 
 struct OutputFormatSelector: View {
-    let selectedOutputFormat: UTType
+    @Binding var selectedOutputFormat: UTType
     let supportedTypes: [String: [UTType]]
-    let onFormatSelected: (UTType) -> Void
+    let showError: Bool
+    let errorMessage: String?
     
     @State private var isHovered = false
     @State private var isMenuOpen = false
@@ -86,7 +94,7 @@ struct OutputFormatSelector: View {
                     ForEach(supportedTypes[category] ?? [], id: \.identifier) { format in
                         Button(action: {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                onFormatSelected(format)
+                                selectedOutputFormat = format
                             }
                         }) {
                             HStack {
@@ -157,11 +165,9 @@ struct OutputFormatSelector: View {
 struct ContentView: View {
     @StateObject private var processor = MultiFileProcessor()
     @State private var isDragging = false
-    @State private var showAlert = false
-    @State private var alertMessage = ""
-    @State private var selectedInputFormat: UTType?
+    @State private var showError = false
+    @State private var errorMessage: String?
     @State private var selectedOutputFormat: UTType = .jpeg
-    @State private var isHovering = false
     
     let supportedTypes: [String: [UTType]] = [
         "Images": [.jpeg, .tiff, .png, .heic, .gif, .bmp, .webP],
@@ -172,7 +178,6 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
-            // Background
             Color(NSColor.windowBackgroundColor)
                 .opacity(0.8)
                 .ignoresSafeArea()
@@ -194,163 +199,32 @@ struct ContentView: View {
                     }
                     .transition(.opacity)
                 } else {
-                    // Main conversion interface
                     VStack(spacing: 32) {
-                        // Format selector
-                        HStack(spacing: 16) {
-                            if let inputFormat = selectedInputFormat {
-                                FormatPill(format: inputFormat, isInput: true)
-                            }
-                            
-                            Image(systemName: "arrow.right")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(.secondary)
-                                .opacity(selectedInputFormat != nil ? 1 : 0)
-                            
-                            OutputFormatSelector(
-                                selectedOutputFormat: selectedOutputFormat,
-                                supportedTypes: supportedTypes,
-                                onFormatSelected: { selectedOutputFormat = $0 }
-                            )
-                        }
+                        // Output format selector
+                        OutputFormatSelector(
+                            selectedOutputFormat: $selectedOutputFormat,
+                            supportedTypes: supportedTypes,
+                            showError: showError,
+                            errorMessage: errorMessage
+                        )
                         .padding(.top, 8)
                         
                         // Drop zone
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 24)
-                                .fill(Color(NSColor.controlBackgroundColor).opacity(0.4))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 24)
-                                        .strokeBorder(
-                                            LinearGradient(
-                                                colors: [
-                                                    .accentColor.opacity(isDragging ? 0.3 : 0.1),
-                                                    .accentColor.opacity(isDragging ? 0.2 : 0.05)
-                                                ],
-                                                startPoint: .top,
-                                                endPoint: .bottom
-                                            ),
-                                            lineWidth: 1
-                                        )
-                                )
-                                .shadow(
-                                    color: .accentColor.opacity(isDragging ? 0.1 : 0),
-                                    radius: 8,
-                                    y: 4
-                                )
-                            
-                            VStack(spacing: 16) {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color.accentColor.opacity(0.1))
-                                        .frame(width: 64, height: 64)
-                                    
-                                    Image(systemName: isDragging ? "arrow.down.circle.fill" : "square.and.arrow.up.circle.fill")
-                                        .font(.system(size: 32, weight: .medium))
-                                        .foregroundStyle(
-                                            LinearGradient(
-                                                colors: [.accentColor, .accentColor.opacity(0.8)],
-                                                startPoint: .top,
-                                                endPoint: .bottom
-                                            )
-                                        )
-                                        .symbolEffect(.bounce, value: isDragging)
-                                }
-                                
-                                VStack(spacing: 8) {
-                                    Text(isDragging ? "Release to Convert" : "Drop Files Here")
-                                        .font(.system(size: 16, weight: .medium))
-                                    
-                                    if !isDragging {
-                                        Text("or click to browse")
-                                            .font(.system(size: 14))
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
+                        DropZoneView(
+                            isDragging: $isDragging,
+                            showError: $showError,
+                            errorMessage: $errorMessage,
+                            selectedFormat: selectedOutputFormat
+                        ) { urls in
+                            Task {
+                                await handleSelectedFiles(urls)
                             }
-                            .padding(40)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .contentShape(Rectangle())
-                        .onTapGesture(perform: selectFiles)
-                        .onDrop(of: [.fileURL], isTargeted: $isDragging) { providers -> Bool in
-                            Task { @MainActor in
-                                do {
-                                    await handleDrop(providers: providers)
-                                } catch {
-                                    alertMessage = error.localizedDescription
-                                    showAlert = true
-                                }
-                            }
-                            return true
                         }
                     }
                     .padding(24)
                 }
             }
             .frame(minWidth: 480, minHeight: 360)
-        }
-        .alert("Conversion Error", isPresented: $showAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(alertMessage)
-        }
-    }
-    
-    private func selectFiles() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowedContentTypes = Array(supportedTypes.values.flatMap { $0 })
-        
-        panel.begin { response in
-            if response == .OK {
-                Task {
-                    await handleSelectedFiles(panel.urls)
-                }
-            }
-        }
-    }
-    
-    private func handleDrop(providers: [NSItemProvider]) {
-        Task { @MainActor in
-            do {
-                var urls: [URL] = []
-                
-                for provider in providers {
-                    if provider.canLoadObject(ofClass: URL.self) {
-                        if let url = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? URL {
-                            // Validate file exists and is readable
-                            guard FileManager.default.fileExists(atPath: url.path),
-                                  FileManager.default.isReadableFile(atPath: url.path) else {
-                                continue
-                            }
-                            
-                            // Validate file type
-                            let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
-                            guard let fileType = resourceValues.contentType,
-                                  supportedTypes.values.contains(where: { types in
-                                      types.contains { fileType.conforms(to: $0) }
-                                  }) else {
-                                continue
-                            }
-                            
-                            urls.append(url)
-                        }
-                    }
-                }
-                
-                guard !urls.isEmpty else { 
-                    throw ConversionError.invalidInput
-                }
-                
-                await handleSelectedFiles(urls)
-                
-            } catch {
-                alertMessage = error.localizedDescription
-                showAlert = true
-            }
         }
     }
     
@@ -360,32 +234,30 @@ struct ContentView: View {
         
         do {
             let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
-            let type = resourceValues.contentType ?? .item
+            guard let inputType = resourceValues.contentType else {
+                throw ConversionError.invalidInput
+            }
             
-            // Update selected input format
-            selectedInputFormat = type
+            // Create a FileProcessor instance
+            let fileProcessor = FileProcessor()
+            let result = try await fileProcessor.processFile(url, outputFormat: selectedOutputFormat)
             
-            // Find appropriate output format category
-            if let category = supportedTypes.first(where: { entry in
-                entry.value.contains { type.conforms(to: $0) }
-            }) {
-                selectedOutputFormat = category.value.first ?? .jpeg
-                
-                let processor = FileProcessor()
-                try await processor.processFile(url, outputFormat: selectedOutputFormat)
-                
-                if let result = processor.processingResult {
-                    withAnimation(.spring(response: 0.3)) {
-                        self.processor.processingResult = result
-                    }
-                }
-            } else {
-                throw ConversionError.unsupportedFormat
+            withAnimation(.spring(response: 0.3)) {
+                processor.isProcessing = false
+                processor.processingResult = result
             }
         } catch {
-            await MainActor.run {
-                alertMessage = error.localizedDescription
-                showAlert = true
+            withAnimation(.easeInOut(duration: 0.2)) {
+                errorMessage = error.localizedDescription
+                showError = true
+            }
+            
+            // Auto-hide error after 3 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                withAnimation {
+                    showError = false
+                    errorMessage = nil
+                }
             }
         }
     }
@@ -430,24 +302,30 @@ func getFormatIcon(for format: UTType) -> String {
     return "doc"
 }
 
-@MainActor
-class FileDropHandler {
-    func handleProviders(_ providers: [NSItemProvider], outputFormat: UTType) async throws -> [URL] {
-        var urls: [URL] = []
-        
-        for provider in providers {
-            if provider.canLoadObject(ofClass: URL.self) {
-                if let url = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? URL {
-                    guard FileManager.default.fileExists(atPath: url.path),
-                          FileManager.default.isReadableFile(atPath: url.path) else {
-                        continue
-                    }
-                    urls.append(url)
-                }
-            }
-        }
-        
-        guard !urls.isEmpty else { throw ConversionError.invalidInput }
-        return urls
+private func checkFormatCompatibility(input: UTType, output: UTType) -> Bool {
+    // Define format compatibility rules
+    let imageFormats: Set<UTType> = [.jpeg, .png, .tiff, .gif, .heic, .webP]
+    let videoFormats: Set<UTType> = [.mpeg4Movie, .quickTimeMovie, .avi]
+    let audioFormats: Set<UTType> = [.mp3, .wav, .aiff, .mpeg4Audio]
+    
+    // PDF special cases
+    if input == .pdf && imageFormats.contains(output) {
+        return true
     }
+    if imageFormats.contains(input) && output == .pdf {
+        return true
+    }
+    
+    // Check if formats are in the same category
+    if imageFormats.contains(input) && imageFormats.contains(output) {
+        return true
+    }
+    if videoFormats.contains(input) && videoFormats.contains(output) {
+        return true
+    }
+    if audioFormats.contains(input) && audioFormats.contains(output) {
+        return true
+    }
+    
+    return false
 }

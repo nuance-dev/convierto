@@ -9,13 +9,15 @@
             <string>Default</string>
             <key>LSItemContentTypes</key>
             <array>
-                <string>public.content</string>
-                <string>public.data</string>
                 <string>public.image</string>
                 <string>public.movie</string>
                 <string>public.audio</string>
                 <string>com.adobe.pdf</string>
+                <string>public.content</string>
+                <string>public.data</string>
             </array>
+            <key>NSDocumentClass</key>
+            <string>FileDocument</string>
         </dict>
     </array>
     <key>NSDesktopFolderUsageDescription</key>

@@ -1,6 +1,13 @@
+import Combine
 import Foundation
 import UniformTypeIdentifiers
 import AppKit
+import os.log
+
+private let logger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "Convierto",
+    category: "FileProcessor"
+)
 
 enum ConversionError: LocalizedError {
     case unsupportedFormat
@@ -65,92 +72,133 @@ class FileProcessor: ObservableObject {
     private let documentProcessor = DocumentProcessor()
     private let fileManager = FileManager.default
     
-    func processFile(_ url: URL, outputFormat: UTType) async throws {
-        isProcessing = true
-        progress = 0
-        
-        do {
-            let result = try await processFileInternal(url, outputFormat: outputFormat)
-            await MainActor.run {
-                self.processingResult = result
-                self.progress = 1.0
-            }
-        } catch {
-            await MainActor.run {
-                self.progress = 0
-            }
-            throw error
-        }
+    func processFile(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
+        logger.info("Starting file processing for URL: \(url.lastPathComponent)")
         
         await MainActor.run {
-            self.isProcessing = false
+            self.isProcessing = true
+            self.progress = 0
         }
-    }
-    
-    private func processFileInternal(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
-        guard fileManager.isReadableFile(atPath: url.path) else {
+        
+        // Create security-scoped bookmark
+        let bookmarkData = try url.bookmarkData(
+            options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+        
+        var isStale = false
+        guard let resolvedURL = try? URL(
+            resolvingBookmarkData: bookmarkData,
+            options: .withSecurityScope,
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ) else {
             throw ConversionError.fileAccessDenied
         }
         
-        guard url.startAccessingSecurityScopedResource() else {
+        guard resolvedURL.startAccessingSecurityScopedResource() else {
             throw ConversionError.sandboxViolation
         }
         
         defer {
-            url.stopAccessingSecurityScopedResource()
+            resolvedURL.stopAccessingSecurityScopedResource()
         }
         
-        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey])
+        let resourceValues = try await resolvedURL.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey])
         guard let inputType = resourceValues.contentType else {
+            logger.error("Invalid input type for file: \(url.lastPathComponent)")
             throw ConversionError.invalidInput
         }
         
-        if let fileSize = resourceValues.fileSize, fileSize > 100_000_000 {
-            throw ConversionError.fileTooLarge
+        logger.debug("Input type: \(inputType.identifier), Output format: \(outputFormat.identifier)")
+        
+        if let fileSize = resourceValues.fileSize {
+            logger.debug("File size: \(fileSize) bytes")
+            if fileSize > 100_000_000 {
+                logger.error("File too large: \(fileSize) bytes")
+                throw ConversionError.fileTooLarge
+            }
         }
         
         if inputType == outputFormat {
+            logger.notice("Input and output formats are identical: \(inputType.identifier)")
             throw ConversionError.sameFormat
         }
         
         let progress = Progress(totalUnitCount: 100)
-        
-        // Create a separate task for progress monitoring
-        let progressTask = Task { @MainActor in
-            for await value in progress.publisher(for: \.fractionCompleted).values {
-                self.progress = value
+        progress.publisher(for: \.fractionCompleted)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] value in
+                self?.progress = value
             }
-        }
+            .store(in: &cancellables)
         
-        defer {
-            progressTask.cancel()
+        do {
+            let result: ProcessingResult
+            
+            // Handle PDF to Image conversion
+            if inputType.conforms(to: .pdf) && outputFormat.conforms(to: .image) {
+                logger.debug("Converting PDF to Image")
+                result = try await documentProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
+            }
+            // Handle Image to PDF conversion
+            else if inputType.conforms(to: .image) && outputFormat == .pdf {
+                logger.debug("Converting Image to PDF")
+                result = try await documentProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
+            }
+            // Handle video conversion
+            else if inputType.conforms(to: .audiovisualContent) {
+                logger.debug("Converting Video")
+                result = try await videoProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
+            }
+            // Handle audio conversion
+            else if inputType.conforms(to: .audio) {
+                logger.debug("Converting Audio")
+                result = try await audioProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
+            }
+            // Handle image conversion
+            else if inputType.conforms(to: .image) {
+                logger.debug("Converting Image")
+                result = try await imageProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
+            }
+            else {
+                logger.error("Incompatible formats: \(inputType.identifier) → \(outputFormat.identifier)")
+                throw ConversionError.incompatibleFormats
+            }
+            
+            logger.info("Conversion successful: \(result.outputURL.lastPathComponent)")
+            await MainActor.run {
+                self.processingResult = result
+            }
+            return result
+            
+        } catch {
+            logger.error("Conversion failed: \(error.localizedDescription)")
+            throw error
         }
-        
-        return try await convert(
-            url: url,
-            inputType: inputType,
-            outputFormat: outputFormat,
-            progress: progress
-        )
     }
     
-    private func convert(
-        url: URL,
-        inputType: UTType,
-        outputFormat: UTType,
-        progress: Progress
-    ) async throws -> ProcessingResult {
-        try await withTimeout(seconds: 300) { // 5 minute timeout
-            if inputType.conforms(to: .image) {
-                return try await self.imageProcessor.convert(url, to: outputFormat, progress: progress)
-            } else if inputType.conforms(to: .movie) {
-                return try await self.videoProcessor.convert(url, to: outputFormat, progress: progress)
-            } else if inputType.conforms(to: .audio) {
-                return try await self.audioProcessor.convert(url, to: outputFormat, progress: progress)
-            } else if inputType.conforms(to: .pdf) {
-                return try await self.documentProcessor.convert(url, to: outputFormat, progress: progress)
-            }
-            throw ConversionError.unsupportedFormat
+    private var cancellables = Set<AnyCancellable>()
+}
+
+// MARK: - Format Validation
+extension FileProcessor {
+    func validateFormat(_ format: UTType, for operation: String) -> Bool {
+        logger.debug("Validating format: \(format.identifier) for operation: \(operation)")
+        let supported = supportedFormats(for: operation).contains(format)
+        logger.debug("Format \(format.identifier) supported: \(supported)")
+        return supported
+    }
+    
+    private func supportedFormats(for operation: String) -> Set<UTType> {
+        switch operation {
+        case "input":
+            return [.jpeg, .png, .pdf, .mpeg4Movie, .quickTimeMovie, .mp3, .wav]
+        case "output":
+            return [.jpeg, .png, .pdf, .mpeg4Movie, .mp3, .wav]
+        default:
+            return []
         }
     }
 }
