@@ -248,7 +248,7 @@ struct MultiFileView: View {
                     }
                 } label: {
                     HStack(spacing: 4) {
-                        Text("Convert to: \(processor.selectedOutputFormat.localizedDescription)")
+                        Text("Convert to: \(String(describing: processor.selectedOutputFormat.localizedDescription))")
                             .font(.system(size: 13))
                         Image(systemName: "chevron.down")
                             .font(.system(size: 10))

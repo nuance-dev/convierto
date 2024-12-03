@@ -42,6 +42,7 @@ struct ProcessingResult {
     let fileType: UTType
 }
 
+@MainActor
 class FileProcessor: ObservableObject {
     @Published var isProcessing = false
     @Published var progress: Double = 0
@@ -52,43 +53,66 @@ class FileProcessor: ObservableObject {
     private let audioProcessor = AudioProcessor()
     private let documentProcessor = DocumentProcessor()
     
+    // Define supported types and their conversion targets
+    private let supportedTypes: [UTType: Set<UTType>] = [
+        .image: [.jpeg, .png, .tiff, .gif, .bmp, .webP, .heic],
+        .movie: [.mpeg4Movie, .quickTimeMovie, .avi],
+        .audio: [.mp3, .wav, .aiff, .mpeg4Audio],
+        .pdf: [.jpeg, .png, .pdf]
+    ]
+    
     func processFile(_ url: URL, outputFormat: UTType) async throws {
         isProcessing = true
         progress = 0
-        defer { isProcessing = false }
         
-        let inputType = try await url.resourceValues(forKeys: [.contentTypeKey]).contentType ?? .item
+        defer { 
+            isProcessing = false
+        }
         
-        guard isConversionSupported(from: inputType, to: outputFormat) else {
+        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+        let inputType = resourceValues.contentType ?? .item
+        
+        // Find matching base type
+        let baseType = supportedTypes.keys.first { type in
+            inputType.conforms(to: type) || 
+            supportedTypes[type]?.contains(inputType) == true
+        }
+        
+        guard let baseType = baseType else {
+            throw ConversionError.unsupportedFormat
+        }
+        
+        // Validate output format
+        guard let supportedOutputs = supportedTypes[baseType],
+              supportedOutputs.contains(outputFormat) else {
             throw ConversionError.incompatibleFormats
         }
         
         let result = try await withProgress { progress in
-            switch true {
-            case inputType.conforms(to: .image):
-                return try await self.imageProcessor.convert(url, to: outputFormat, progress: progress)
-            case inputType.conforms(to: .movie):
-                return try await self.videoProcessor.convert(url, to: outputFormat, progress: progress)
-            case inputType.conforms(to: .audio):
-                return try await self.audioProcessor.convert(url, to: outputFormat, progress: progress)
-            case inputType.conforms(to: .pdf):
-                return try await self.documentProcessor.convert(url, to: outputFormat, progress: progress)
+            switch baseType {
+            case .image:
+                return try await self.imageProcessor.convert(url, to: outputFormat, progress: progress) // Must have self, keep this comment so we don't forget
+            case .movie:
+                return try await self.videoProcessor.convert(url, to: outputFormat, progress: progress) // Must have self, keep this comment so we don't forget
+            case .audio:
+                return try await self.audioProcessor.convert(url, to: outputFormat, progress: progress) // Must have self, keep this comment so we don't forget
+            case .pdf:
+                return try await self.documentProcessor.convert(url, to: outputFormat, progress: progress) // Must have self, keep this comment so we don't forget
             default:
                 throw ConversionError.unsupportedFormat
             }
         }
         
-        await MainActor.run {
-            self.processingResult = result
-        }
+        self.processingResult = result
+        self.progress = 1.0
     }
     
     private func withProgress<T>(_ operation: @escaping (Progress) async throws -> T) async throws -> T {
         let progress = Progress(totalUnitCount: 100)
         
-        let observation = progress.observe(\.fractionCompleted) { progress, _ in
-            Task { @MainActor in
-                self.progress = progress.fractionCompleted
+        let observation = progress.observe(\.fractionCompleted) { [weak self] progress, _ in
+            Task { @MainActor [weak self] in
+                self?.progress = progress.fractionCompleted
             }
         }
         
@@ -96,22 +120,11 @@ class FileProcessor: ObservableObject {
             observation.invalidate()
         }
         
-        return try await operation(progress)
-    }
-    
-    private func isConversionSupported(from input: UTType, to output: UTType) -> Bool {
-        let supportedConversions: [UTType: Set<UTType>] = [
-            .image: [.jpeg, .png, .tiff, .gif, .bmp, .webP, .heic],
-            .movie: [.mpeg4Movie, .quickTimeMovie, .avi],
-            .audio: [.mp3, .wav, .aiff, .mpeg4Audio],
-            .pdf: [.jpeg, .png, .pdf]
-        ]
-        
-        guard let baseType = supportedConversions.keys.first(where: { input.conforms(to: $0) }),
-              let supportedOutputs = supportedConversions[baseType] else {
-            return false
+        do {
+            return try await operation(progress)
+        } catch {
+            self.progress = 0
+            throw error
         }
-        
-        return supportedOutputs.contains(output)
     }
 }

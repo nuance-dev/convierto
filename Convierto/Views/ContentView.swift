@@ -277,7 +277,14 @@ struct ContentView: View {
                         .contentShape(Rectangle())
                         .onTapGesture(perform: selectFiles)
                         .onDrop(of: [.fileURL], isTargeted: $isDragging) { providers -> Bool in
-                            handleDrop(providers: providers)
+                            Task { @MainActor in
+                                do {
+                                    await handleDrop(providers: providers)
+                                } catch {
+                                    alertMessage = error.localizedDescription
+                                    showAlert = true
+                                }
+                            }
                             return true
                         }
                     }
@@ -311,37 +318,64 @@ struct ContentView: View {
     
     private func handleDrop(providers: [NSItemProvider]) {
         Task { @MainActor in
-            var urls: [URL] = []
-            
-            for provider in providers {
-                if let url = try? await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) as? URL {
-                    urls.append(url)
+            do {
+                var urls: [URL] = []
+                
+                for provider in providers {
+                    if provider.canLoadObject(ofClass: URL.self) {
+                        if let url = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? URL {
+                            guard FileManager.default.fileExists(atPath: url.path),
+                                  FileManager.default.isReadableFile(atPath: url.path) else {
+                                throw ConversionError.invalidInput
+                            }
+                            urls.append(url)
+                        }
+                    }
                 }
+                
+                guard !urls.isEmpty else { throw ConversionError.invalidInput }
+                await handleSelectedFiles(urls)
+                
+            } catch {
+                alertMessage = error.localizedDescription
+                showAlert = true
             }
-            
-            await handleSelectedFiles(urls)
         }
     }
     
+    @MainActor
     private func handleSelectedFiles(_ urls: [URL]) async {
         guard let url = urls.first else { return }
         
         do {
-            let type = try await url.resourceValues(forKeys: [.contentTypeKey]).contentType ?? .item
+            let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+            let type = resourceValues.contentType ?? .item
+            
+            // Update selected input format
             selectedInputFormat = type
             
-            // Auto-select appropriate output format
+            // Find appropriate output format category
             if let category = supportedTypes.first(where: { entry in
                 entry.value.contains { type.conforms(to: $0) }
             }) {
                 selectedOutputFormat = category.value.first ?? .jpeg
+                
+                let processor = FileProcessor()
+                try await processor.processFile(url, outputFormat: selectedOutputFormat)
+                
+                if let result = processor.processingResult {
+                    withAnimation(.spring(response: 0.3)) {
+                        self.processor.processingResult = result
+                    }
+                }
+            } else {
+                throw ConversionError.unsupportedFormat
             }
-            
-            let processor = FileProcessor()
-            try await processor.processFile(url, outputFormat: selectedOutputFormat)
         } catch {
-            alertMessage = error.localizedDescription
-            showAlert = true
+            await MainActor.run {
+                alertMessage = error.localizedDescription
+                showAlert = true
+            }
         }
     }
 }
@@ -383,4 +417,26 @@ func getFormatIcon(for format: UTType) -> String {
         return "music.note"
     }
     return "doc"
+}
+
+@MainActor
+class FileDropHandler {
+    func handleProviders(_ providers: [NSItemProvider], outputFormat: UTType) async throws -> [URL] {
+        var urls: [URL] = []
+        
+        for provider in providers {
+            if provider.canLoadObject(ofClass: URL.self) {
+                if let url = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? URL {
+                    guard FileManager.default.fileExists(atPath: url.path),
+                          FileManager.default.isReadableFile(atPath: url.path) else {
+                        continue
+                    }
+                    urls.append(url)
+                }
+            }
+        }
+        
+        guard !urls.isEmpty else { throw ConversionError.invalidInput }
+        return urls
+    }
 }

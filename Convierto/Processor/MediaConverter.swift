@@ -49,6 +49,21 @@ actor MediaConverter {
         }
     }
     
+    private func monitorProgress(of session: AVAssetExportSession, 
+                               handler: @Sendable @escaping (Float) -> Void) async {
+        while !Task.isCancelled {
+            await MainActor.run {
+                handler(session.progress)
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+            
+            let status = session.status
+            if status == .completed || status == .failed || status == .cancelled {
+                break
+            }
+        }
+    }
+    
     func convertMedia(
         inputURL: URL,
         outputURL: URL,
@@ -57,6 +72,10 @@ actor MediaConverter {
     ) async throws {
         let asset = AVAsset(url: inputURL)
         
+        guard try await asset.load(.isPlayable) else {
+            throw ConversionError.invalidInput
+        }
+        
         guard let exportSession = AVAssetExportSession(
             asset: asset,
             presetName: AVAssetExportPresetHighestQuality
@@ -64,40 +83,32 @@ actor MediaConverter {
             throw ConversionError.exportFailed
         }
         
-        // Configure export session
-        exportSession.outputURL = outputURL
-        exportSession.outputFileType = format.fileType
-        
-        // Use a separate task for progress monitoring
-        let progressTask = Task.detached { [weak exportSession] in
-            while let session = exportSession, !Task.isCancelled {
-                await MainActor.run {
-                    progressHandler(session.progress)
-                }
-                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
-                
-                if session.status != .exporting {
-                    break
-                }
-            }
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try? FileManager.default.removeItem(at: outputURL)
         }
         
-        defer { progressTask.cancel() }
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = format.fileType
+        exportSession.shouldOptimizeForNetworkUse = true
         
-        // Perform the export
-        try await withCheckedThrowingContinuation { continuation in
-            exportSession.exportAsynchronously {
-                switch exportSession.status {
-                case .completed:
-                    continuation.resume()
-                case .failed:
-                    continuation.resume(throwing: exportSession.error ?? ConversionError.exportFailed)
-                case .cancelled:
-                    continuation.resume(throwing: ConversionError.exportFailed)
-                default:
-                    continuation.resume(throwing: ConversionError.conversionFailed)
-                }
-            }
+        if let metadata = try? await asset.load(.metadata) {
+            exportSession.metadata = metadata
+        }
+        
+        let progressTask = Task {
+            await monitorProgress(of: exportSession, handler: progressHandler)
+        }
+        
+        await exportSession.export()
+        progressTask.cancel()
+        
+        switch exportSession.status {
+        case .completed:
+            return
+        case .failed:
+            throw exportSession.error ?? ConversionError.exportFailed
+        default:
+            throw ConversionError.conversionFailed
         }
     }
     
@@ -105,12 +116,10 @@ actor MediaConverter {
         let asset = AVAsset(url: inputURL)
         let tracks = try await asset.loadTracks(withMediaType: .video)
         
-        // If it has video tracks, return video formats
         if !tracks.isEmpty {
             return [.mp4, .mov, .m4v]
         }
         
-        // Check for audio-only content
         let audioTracks = try await asset.loadTracks(withMediaType: .audio)
         if !audioTracks.isEmpty {
             return [.m4a, .wav]
