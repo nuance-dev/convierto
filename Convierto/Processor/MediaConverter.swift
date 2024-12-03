@@ -49,15 +49,16 @@ actor MediaConverter {
         }
     }
     
-    private func monitorProgress(of session: AVAssetExportSession, 
+    private func monitorProgress(of session: SendableExportSession, 
                                handler: @Sendable @escaping (Float) -> Void) async {
         while !Task.isCancelled {
+            let progress = await session.progress
             await MainActor.run {
-                handler(session.progress)
+                handler(progress)
             }
             try? await Task.sleep(for: .milliseconds(100))
             
-            let status = session.status
+            let status = await session.status
             if status == .completed || status == .failed || status == .cancelled {
                 break
             }
@@ -72,10 +73,6 @@ actor MediaConverter {
     ) async throws {
         let asset = AVAsset(url: inputURL)
         
-        guard try await asset.load(.isPlayable) else {
-            throw ConversionError.invalidInput
-        }
-        
         guard let exportSession = AVAssetExportSession(
             asset: asset,
             presetName: AVAssetExportPresetHighestQuality
@@ -83,33 +80,18 @@ actor MediaConverter {
             throw ConversionError.exportFailed
         }
         
-        if FileManager.default.fileExists(atPath: outputURL.path) {
-            try? FileManager.default.removeItem(at: outputURL)
-        }
+        let sendableSession = SendableExportSession(exportSession)
         
         exportSession.outputURL = outputURL
         exportSession.outputFileType = format.fileType
         exportSession.shouldOptimizeForNetworkUse = true
         
-        if let metadata = try? await asset.load(.metadata) {
-            exportSession.metadata = metadata
-        }
-        
         let progressTask = Task {
-            await monitorProgress(of: exportSession, handler: progressHandler)
+            await monitorProgress(of: sendableSession, handler: progressHandler)
         }
         
-        await exportSession.export()
+        try await sendableSession.export()
         progressTask.cancel()
-        
-        switch exportSession.status {
-        case .completed:
-            return
-        case .failed:
-            throw exportSession.error ?? ConversionError.exportFailed
-        default:
-            throw ConversionError.conversionFailed
-        }
     }
     
     func getSupportedFormats(for inputURL: URL) async throws -> [OutputFormat] {

@@ -77,11 +77,12 @@ struct OutputFormatSelector: View {
     
     @State private var isHovered = false
     @State private var isMenuOpen = false
+    @Environment(\.colorScheme) var colorScheme
     
     var body: some View {
         Menu {
             ForEach(supportedTypes.keys.sorted(), id: \.self) { category in
-                Section(header: Text(category).foregroundColor(.secondary)) {
+                Section {
                     ForEach(supportedTypes[category] ?? [], id: \.identifier) { format in
                         Button(action: {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
@@ -92,7 +93,7 @@ struct OutputFormatSelector: View {
                                 Image(systemName: getFormatIcon(for: format))
                                     .foregroundColor(format == selectedOutputFormat ? .accentColor : .secondary)
                                     .font(.system(size: 14))
-                                Text(format.localizedDescription ?? "Unknown Format")
+                                Text(format.localizedDescription ?? format.identifier)
                                     .font(.system(size: 14))
                                 if format == selectedOutputFormat {
                                     Spacer()
@@ -103,54 +104,50 @@ struct OutputFormatSelector: View {
                             }
                         }
                     }
+                } header: {
+                    Text(category)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(.top, 4)
                 }
             }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: getFormatIcon(for: selectedOutputFormat))
-                    .foregroundStyle(
-                        .linearGradient(
-                            colors: [.accentColor, .accentColor.opacity(0.8)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
+                    .foregroundStyle(.linearGradient(colors: [.accentColor, .accentColor.opacity(0.8)],
+                                                   startPoint: .top,
+                                                   endPoint: .bottom))
                     .font(.system(size: 14, weight: .medium))
                 
-                Text(selectedOutputFormat.localizedDescription ?? "Unknown format")
+                Text(selectedOutputFormat.localizedDescription ?? selectedOutputFormat.identifier)
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.primary.opacity(0.9))
                 
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.secondary.opacity(0.8))
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
                     .rotationEffect(.degrees(isMenuOpen ? 180 : 0))
-                    .animation(.spring(response: 0.2), value: isMenuOpen)
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(
                 ZStack {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color(NSColor.controlBackgroundColor))
-                        .opacity(0.4)
-                    
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(
-                            isHovered ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.1),
-                            lineWidth: 1
-                        )
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(colorScheme == .dark ? Color.black.opacity(0.3) : Color.white.opacity(0.8))
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.accentColor.opacity(isHovered ? 0.2 : 0.1), lineWidth: 1)
                 }
             )
+            .shadow(color: .accentColor.opacity(isHovered ? 0.1 : 0), radius: 8, x: 0, y: 4)
             .scaleEffect(isHovered ? 1.01 : 1.0)
-            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
         }
         .menuStyle(BorderlessButtonMenuStyle())
         .onHover { hovering in
-            isHovered = hovering
+            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+                isHovered = hovering
+            }
         }
         .onChange(of: isMenuOpen) { oldValue, newValue in
-            withAnimation {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 isHovered = newValue
             }
         }
@@ -324,16 +321,30 @@ struct ContentView: View {
                 for provider in providers {
                     if provider.canLoadObject(ofClass: URL.self) {
                         if let url = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? URL {
+                            // Validate file exists and is readable
                             guard FileManager.default.fileExists(atPath: url.path),
                                   FileManager.default.isReadableFile(atPath: url.path) else {
-                                throw ConversionError.invalidInput
+                                continue
                             }
+                            
+                            // Validate file type
+                            let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+                            guard let fileType = resourceValues.contentType,
+                                  supportedTypes.values.contains(where: { types in
+                                      types.contains { fileType.conforms(to: $0) }
+                                  }) else {
+                                continue
+                            }
+                            
                             urls.append(url)
                         }
                     }
                 }
                 
-                guard !urls.isEmpty else { throw ConversionError.invalidInput }
+                guard !urls.isEmpty else { 
+                    throw ConversionError.invalidInput
+                }
+                
                 await handleSelectedFiles(urls)
                 
             } catch {

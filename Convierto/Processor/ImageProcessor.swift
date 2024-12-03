@@ -5,9 +5,12 @@ import AppKit
 // Image Processor Implementation
 class ImageProcessor {
     func convert(_ url: URL, to format: UTType, progress: Progress) async throws -> ProcessingResult {
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             throw ConversionError.invalidInput
+        }
+        
+        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+            throw ConversionError.conversionFailed
         }
         
         let outputURL = try CacheManager.shared.createTemporaryURL(for: url.lastPathComponent)
@@ -37,7 +40,7 @@ class ImageProcessor {
         return ProcessingResult(
             outputURL: outputURL,
             originalFileName: url.lastPathComponent,
-            suggestedFileName: url.deletingPathExtension().lastPathComponent + "." + (format.preferredFilenameExtension ?? ""),
+            suggestedFileName: url.deletingPathExtension().lastPathComponent + "." + (format.preferredFilenameExtension ?? "converted"),
             fileType: format
         )
     }

@@ -1,5 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict/>
+<dict>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>LSHandlerRank</key>
+            <string>Default</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.content</string>
+                <string>public.data</string>
+                <string>public.image</string>
+                <string>public.movie</string>
+                <string>public.audio</string>
+                <string>com.adobe.pdf</string>
+            </array>
+        </dict>
+    </array>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>We need access to process your files</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>We need access to process your files</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>We need access to process your files</string>
+</dict>
 </plist>

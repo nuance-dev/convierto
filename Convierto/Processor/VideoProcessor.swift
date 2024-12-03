@@ -57,12 +57,15 @@ class VideoProcessor {
             progress.completedUnitCount = Int64(export.progress * 100)
         }
         
-        try await export.export()
-        progressObserver.cancel()
-        
-        guard export.status == .completed else {
-            throw export.error ?? ConversionError.exportFailed
+        let exportTask = Task {
+            await export.export()
+            guard export.status == .completed else {
+                throw export.error ?? ConversionError.exportFailed
+            }
         }
+        
+        try await exportTask.value
+        progressObserver.cancel()
         
         progress.completedUnitCount = 100
         

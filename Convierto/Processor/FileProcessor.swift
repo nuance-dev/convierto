@@ -14,6 +14,8 @@ enum ConversionError: LocalizedError {
     case exportFailed
     case audioExtractionFailed
     case documentConversionFailed
+    case fileAccessDenied
+    case securityScopedResourceFailed
     
     var errorDescription: String? {
         switch self {
@@ -22,7 +24,7 @@ enum ConversionError: LocalizedError {
         case .conversionFailed:
             return "Failed to convert the file"
         case .invalidInput:
-            return "The input file is invalid or corrupted"
+            return "The file appears to be corrupted or inaccessible"
         case .incompatibleFormats:
             return "Cannot convert between these formats"
         case .exportFailed:
@@ -31,6 +33,10 @@ enum ConversionError: LocalizedError {
             return "Failed to extract audio from the file"
         case .documentConversionFailed:
             return "Failed to convert the document"
+        case .fileAccessDenied:
+            return "Cannot access the file. Please check permissions"
+        case .securityScopedResourceFailed:
+            return "Cannot access the file due to security restrictions"
         }
     }
 }
@@ -53,7 +59,6 @@ class FileProcessor: ObservableObject {
     private let audioProcessor = AudioProcessor()
     private let documentProcessor = DocumentProcessor()
     
-    // Define supported types and their conversion targets
     private let supportedTypes: [UTType: Set<UTType>] = [
         .image: [.jpeg, .png, .tiff, .gif, .bmp, .webP, .heic],
         .movie: [.mpeg4Movie, .quickTimeMovie, .avi],
@@ -62,17 +67,41 @@ class FileProcessor: ObservableObject {
     ]
     
     func processFile(_ url: URL, outputFormat: UTType) async throws {
-        isProcessing = true
-        progress = 0
-        
-        defer { 
-            isProcessing = false
+        await setProcessingState(true)
+        defer {
+            Task { @MainActor in
+                self.isProcessing = false
+            }
         }
         
-        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
-        let inputType = resourceValues.contentType ?? .item
+        do {
+            let result = try await processFileInternal(url: url, outputFormat: outputFormat)
+            await MainActor.run {
+                self.processingResult = result
+                self.progress = 1.0
+            }
+        } catch {
+            await MainActor.run {
+                self.progress = 0
+            }
+            throw error
+        }
+    }
+    
+    private func setProcessingState(_ state: Bool) async {
+        await MainActor.run {
+            self.isProcessing = state
+            self.progress = 0
+        }
+    }
+    
+    private func processFileInternal(url: URL, outputFormat: UTType) async throws -> ProcessingResult {
+        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey, .isReadableKey])
+        guard let inputType = resourceValues.contentType,
+              resourceValues.isReadable == true else {
+            throw ConversionError.fileAccessDenied
+        }
         
-        // Find matching base type
         let baseType = supportedTypes.keys.first { type in
             inputType.conforms(to: type) || 
             supportedTypes[type]?.contains(inputType) == true
@@ -82,49 +111,37 @@ class FileProcessor: ObservableObject {
             throw ConversionError.unsupportedFormat
         }
         
-        // Validate output format
         guard let supportedOutputs = supportedTypes[baseType],
               supportedOutputs.contains(outputFormat) else {
             throw ConversionError.incompatibleFormats
         }
         
-        let result = try await withProgress { progress in
-            switch baseType {
-            case .image:
-                return try await self.imageProcessor.convert(url, to: outputFormat, progress: progress) // Must have self, keep this comment so we don't forget
-            case .movie:
-                return try await self.videoProcessor.convert(url, to: outputFormat, progress: progress) // Must have self, keep this comment so we don't forget
-            case .audio:
-                return try await self.audioProcessor.convert(url, to: outputFormat, progress: progress) // Must have self, keep this comment so we don't forget
-            case .pdf:
-                return try await self.documentProcessor.convert(url, to: outputFormat, progress: progress) // Must have self, keep this comment so we don't forget
-            default:
-                throw ConversionError.unsupportedFormat
-            }
-        }
-        
-        self.processingResult = result
-        self.progress = 1.0
-    }
-    
-    private func withProgress<T>(_ operation: @escaping (Progress) async throws -> T) async throws -> T {
         let progress = Progress(totalUnitCount: 100)
-        
-        let observation = progress.observe(\.fractionCompleted) { [weak self] progress, _ in
-            Task { @MainActor [weak self] in
+        let progressObserver = progress.observe(\.fractionCompleted) { [weak self] _, _ in
+            Task { @MainActor in
                 self?.progress = progress.fractionCompleted
             }
         }
         
         defer {
-            observation.invalidate()
+            progressObserver.invalidate()
         }
         
-        do {
-            return try await operation(progress)
-        } catch {
-            self.progress = 0
-            throw error
-        }
+        let result = try await {
+            switch baseType {
+            case .image:
+                return try await imageProcessor.convert(url, to: outputFormat, progress: progress)
+            case .movie:
+                return try await videoProcessor.convert(url, to: outputFormat, progress: progress)
+            case .audio:
+                return try await audioProcessor.convert(url, to: outputFormat, progress: progress)
+            case .pdf:
+                return try await documentProcessor.convert(url, to: outputFormat, progress: progress)
+            default:
+                throw ConversionError.unsupportedFormat
+            }
+        }()
+        
+        return result
     }
 }

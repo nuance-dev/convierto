@@ -24,7 +24,7 @@ struct DropZoneView: View {
                             RoundedRectangle(cornerRadius: 32)
                                 .strokeBorder(
                                     showError ? Color.red.opacity(0.5) :
-                                    isDragging ? Color.accentColor : Color.secondary.opacity(0.08),
+                                        isDragging ? Color.accentColor : Color.secondary.opacity(0.08),
                                     lineWidth: isDragging || showError ? 2 : 1
                                 )
                         )
@@ -37,18 +37,17 @@ struct DropZoneView: View {
                             .frame(width: isDragging ? 88 : 76)
                         
                         Image(systemName: showError ? "exclamationmark.circle.fill" :
-                              isDragging ? "arrow.down.circle.fill" : "square.and.arrow.up.circle.fill")
+                                isDragging ? "arrow.down.circle.fill" : "square.and.arrow.up.circle.fill")
                             .font(.system(size: isDragging ? 40 : 36, weight: .medium))
                             .foregroundStyle(
                                 LinearGradient(
-                                    colors: [.accentColor, .accentColor.opacity(0.8)],
+                                    colors: showError ? [.red, .red.opacity(0.8)] :
+                                        [.accentColor, .accentColor.opacity(0.8)],
                                     startPoint: .top,
                                     endPoint: .bottom
                                 )
                             )
                             .symbolEffect(.bounce.up.byLayer, value: isDragging)
-                            .shadow(color: showError ? Color.red.opacity(0.2) : .accentColor.opacity(0.2),
-                                   radius: isDragging ? 10 : 0)
                         
                         if showError {
                             Text(errorMessage ?? "Error processing file")
@@ -132,27 +131,52 @@ struct DropZoneView: View {
     }
     
     private func handleDrop(providers: [NSItemProvider]) async throws {
-        @MainActor func process(_ provider: NSItemProvider) async throws {
-            guard provider.canLoadObject(ofClass: URL.self) else {
-                throw ConversionError.invalidInput
-            }
-            
-            let url = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? URL
-            guard let url = url,
-                  FileManager.default.fileExists(atPath: url.path) else {
-                throw ConversionError.invalidInput
-            }
-            
-            let processor = FileProcessor()
-            try await processor.processFile(url, outputFormat: selectedFormat)
-            
-            if let result = processor.processingResult {
-                self.processingResult = result
-            }
-        }
-        
         for provider in providers {
-            try await process(provider)
+            let wrapper = SendableWrapper(provider)
+            
+            guard wrapper.canLoadObject else {
+                throw ConversionError.invalidInput
+            }
+            
+            guard let url = try await wrapper.loadItem(forTypeIdentifier: UTType.fileURL.identifier) else {
+                throw ConversionError.invalidInput
+            }
+            
+            var isStale = false
+            let bookmarkData = try url.bookmarkData(
+                options: .withSecurityScope,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            
+            guard let resolvedURL = try? URL(
+                resolvingBookmarkData: bookmarkData,
+                options: .withSecurityScope,
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            ) else {
+                throw ConversionError.fileAccessDenied
+            }
+            
+            let hasAccess = resolvedURL.startAccessingSecurityScopedResource()
+            defer {
+                if hasAccess {
+                    resolvedURL.stopAccessingSecurityScopedResource()
+                }
+            }
+            
+            if hasAccess {
+                let processor = FileProcessor()
+                try await processor.processFile(resolvedURL, outputFormat: selectedFormat)
+                
+                if let result = processor.processingResult {
+                    await MainActor.run {
+                        self.processingResult = result
+                    }
+                }
+            } else {
+                throw ConversionError.fileAccessDenied
+            }
         }
     }
     
