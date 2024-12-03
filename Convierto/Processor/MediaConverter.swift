@@ -1,112 +1,94 @@
 import Foundation
 import AVFoundation
+import UniformTypeIdentifiers
 
 @available(macOS 14.0, *)
-actor MediaConverter {
-    enum ConversionError: LocalizedError {
-        case exportFailed
-        case invalidInput
-        case unsupportedFormat
-        case conversionFailed
-        
-        var errorDescription: String? {
-            switch self {
-            case .exportFailed: return "Failed to export media"
-            case .invalidInput: return "Invalid input file"
-            case .unsupportedFormat: return "Unsupported format"
-            case .conversionFailed: return "Conversion failed"
-            }
-        }
-    }
+actor MediaConverter: @unchecked Sendable {
+    private let supportedInputFormats = Set<UTType>([
+        .mpeg4Movie, .quickTimeMovie, .avi,
+        .mp3, .wav, .aiff, .mpeg4Audio
+    ])
     
-    enum OutputFormat: String, CaseIterable, Identifiable {
-        case mp4
-        case mov
-        case m4v
-        case wav
-        case m4a
-        
-        var id: String { rawValue }
-        
-        var fileType: AVFileType {
-            switch self {
-            case .mp4: return .mp4
-            case .mov: return .mov
-            case .m4v: return .m4v
-            case .wav: return .wav
-            case .m4a: return .m4a
-            }
-        }
-        
-        var displayName: String {
-            switch self {
-            case .mp4: return "MP4"
-            case .mov: return "QuickTime Movie"
-            case .m4v: return "M4V"
-            case .wav: return "WAV Audio"
-            case .m4a: return "M4A Audio"
-            }
-        }
-    }
-    
-    private func monitorProgress(of session: SendableExportSession, 
-                               handler: @Sendable @escaping (Float) -> Void) async {
-        while !Task.isCancelled {
-            let progress = await session.progress
-            await MainActor.run {
-                handler(progress)
-            }
-            try? await Task.sleep(for: .milliseconds(100))
-            
-            let status = await session.status
-            if status == .completed || status == .failed || status == .cancelled {
-                break
-            }
-        }
-    }
+    private let supportedOutputFormats = Set<UTType>([
+        .mpeg4Movie, .quickTimeMovie,
+        .mp3, .wav,
+        UTType("public.mpeg-4"),
+        UTType("public.mp4"),
+        UTType("public.m4a")
+    ].compactMap { $0 })
     
     func convertMedia(
         inputURL: URL,
         outputURL: URL,
-        toFormat format: OutputFormat,
+        toFormat format: UTType,
         progressHandler: @Sendable @escaping (Float) -> Void
     ) async throws {
-        let asset = AVAsset(url: inputURL)
-        
-        guard let exportSession = AVAssetExportSession(
-            asset: asset,
-            presetName: AVAssetExportPresetHighestQuality
-        ) else {
+        guard let session = try await createExportSession(for: inputURL, outputFormat: format) else {
             throw ConversionError.exportFailed
         }
         
-        let sendableSession = SendableExportSession(exportSession)
+        // Configure export
+        session.outputURL = outputURL
+        session.outputFileType = AVFileType(rawValue: format.identifier)
+        session.shouldOptimizeForNetworkUse = true
         
-        exportSession.outputURL = outputURL
-        exportSession.outputFileType = format.fileType
-        exportSession.shouldOptimizeForNetworkUse = true
-        
-        let progressTask = Task {
-            await monitorProgress(of: sendableSession, handler: progressHandler)
+        // Monitor progress with timeout
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                while !Task.isCancelled {
+                    await MainActor.run {
+                        progressHandler(session.progress)
+                    }
+                    try await Task.sleep(for: .milliseconds(100))
+                    
+                    if session.status == .completed {
+                        break
+                    }
+                }
+            }
+            
+            group.addTask {
+                await session.export()
+                guard session.status == .completed else {
+                    throw session.error ?? ConversionError.exportFailed
+                }
+            }
+            
+            group.addTask {
+                try await Task.sleep(for: .seconds(300))
+                throw ConversionError.conversionTimeout
+            }
+            
+            try await group.next()
+            group.cancelAll()
         }
         
-        try await sendableSession.export()
-        progressTask.cancel()
+        // Verify output
+        guard FileManager.default.fileExists(atPath: outputURL.path),
+              let outputSize = try? outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              outputSize > 0 else {
+            throw ConversionError.exportFailed
+        }
     }
     
-    func getSupportedFormats(for inputURL: URL) async throws -> [OutputFormat] {
-        let asset = AVAsset(url: inputURL)
-        let tracks = try await asset.loadTracks(withMediaType: .video)
-        
-        if !tracks.isEmpty {
-            return [.mp4, .mov, .m4v]
+    private func createExportSession(for url: URL, outputFormat: UTType) async throws -> AVAssetExportSession? {
+        let asset = AVAsset(url: url)
+        guard try await asset.load(.isPlayable) else {
+            throw ConversionError.invalidInput
         }
         
-        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-        if !audioTracks.isEmpty {
-            return [.m4a, .wav]
-        }
-        
-        throw ConversionError.unsupportedFormat
+        return AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetHighestQuality
+        )
+    }
+    
+    func isFormatSupported(_ format: UTType) -> Bool {
+        supportedOutputFormats.contains(format)
+    }
+    
+    func canConvert(from inputFormat: UTType, to outputFormat: UTType) -> Bool {
+        supportedInputFormats.contains(where: { inputFormat.conforms(to: $0) }) &&
+        supportedOutputFormats.contains(outputFormat)
     }
 }

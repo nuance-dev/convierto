@@ -3,15 +3,100 @@ import UniformTypeIdentifiers
 
 struct DropZoneView: View {
     @Binding var isDragging: Bool
-    @Binding var selectedFormat: UTType
-    @State private var processingResult: ProcessingResult?
-    var onTap: () -> Void
-    
     @State private var isHovering = false
-    @State private var dragOffset: CGSize = .zero
-    @State private var hasDropped = false
-    @State private var errorMessage: String?
     @State private var showError = false
+    @State private var errorMessage: String?
+    @State private var processingResult: ProcessingResult?
+    let selectedFormat: UTType
+    let onTap: () -> Void
+    
+    enum DropZoneError: LocalizedError {
+        case invalidInput(String)
+        case fileAccessDenied(String)
+        case processingFailed(String)
+        
+        var errorDescription: String? {
+            switch self {
+            case .invalidInput(let message),
+                 .fileAccessDenied(let message),
+                 .processingFailed(let message):
+                return message
+            }
+        }
+    }
+    
+    private func handleDrop(providers: [NSItemProvider]) async throws {
+        for provider in providers {
+            let wrapper = SendableWrapper(provider)
+            
+            do {
+                guard wrapper.canLoadObject else {
+                    throw DropZoneError.invalidInput("This file can't be processed")
+                }
+                
+                guard let url = try await wrapper.loadItem(forTypeIdentifier: UTType.fileURL.identifier) else {
+                    throw DropZoneError.invalidInput("Unable to access this file")
+                }
+                
+                // File security and access handling
+                let (resolvedURL, hasAccess) = try await securelyAccessFile(url)
+                
+                defer {
+                    if hasAccess {
+                        resolvedURL.stopAccessingSecurityScopedResource()
+                    }
+                }
+                
+                if hasAccess {
+                    let processor = FileProcessor()
+                    try await processor.processFile(resolvedURL, outputFormat: selectedFormat)
+                    
+                    if let result = processor.processingResult {
+                        await MainActor.run {
+                            self.processingResult = result
+                            self.showError = false
+                            self.errorMessage = nil
+                        }
+                    }
+                } else {
+                    throw DropZoneError.fileAccessDenied("Please allow access to this file")
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.showError = true
+                    
+                    // Auto-hide error after 3 seconds with smooth animation
+                    withAnimation(.easeInOut(duration: 0.3).delay(3)) {
+                        self.showError = false
+                        self.errorMessage = nil
+                    }
+                }
+            }
+        }
+    }
+    
+    // Helper function to securely access files
+    private func securelyAccessFile(_ url: URL) async throws -> (URL, Bool) {
+        var isStale = false
+        let bookmarkData = try url.bookmarkData(
+            options: .withSecurityScope,
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+        
+        guard let resolvedURL = try? URL(
+            resolvingBookmarkData: bookmarkData,
+            options: .withSecurityScope,
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ) else {
+            throw DropZoneError.fileAccessDenied("Unable to access this file")
+        }
+        
+        let hasAccess = resolvedURL.startAccessingSecurityScopedResource()
+        return (resolvedURL, hasAccess)
+    }
     
     var body: some View {
         VStack(spacing: 16) {
@@ -87,17 +172,22 @@ struct DropZoneView: View {
                 Task { @MainActor in
                     do {
                         try await handleDrop(providers: providers)
-                        showError = false
-                        errorMessage = nil
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showError = false
+                            errorMessage = nil
+                        }
                     } catch {
-                        errorMessage = error.localizedDescription
-                        showError = true
+                        let errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            self.errorMessage = errorMessage
+                            self.showError = true
+                        }
                         
                         // Auto-hide error after 3 seconds
                         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                            withAnimation {
-                                showError = false
-                                errorMessage = nil
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                self.showError = false
+                                self.errorMessage = nil
                             }
                         }
                     }
@@ -114,7 +204,7 @@ struct DropZoneView: View {
                                                        startPoint: .top,
                                                        endPoint: .bottom))
                         .font(.system(size: 13, weight: .medium))
-                    Text("Converting to \(selectedFormat.localizedDescription ?? selectedFormat.identifier)")
+                    Text("Convert to \(selectedFormat.localizedDescription ?? "new format")")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.secondary)
                 }
@@ -128,56 +218,6 @@ struct DropZoneView: View {
             }
         }
         .padding(24)
-    }
-    
-    private func handleDrop(providers: [NSItemProvider]) async throws {
-        for provider in providers {
-            let wrapper = SendableWrapper(provider)
-            
-            guard wrapper.canLoadObject else {
-                throw ConversionError.invalidInput
-            }
-            
-            guard let url = try await wrapper.loadItem(forTypeIdentifier: UTType.fileURL.identifier) else {
-                throw ConversionError.invalidInput
-            }
-            
-            var isStale = false
-            let bookmarkData = try url.bookmarkData(
-                options: .withSecurityScope,
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            )
-            
-            guard let resolvedURL = try? URL(
-                resolvingBookmarkData: bookmarkData,
-                options: .withSecurityScope,
-                relativeTo: nil,
-                bookmarkDataIsStale: &isStale
-            ) else {
-                throw ConversionError.fileAccessDenied
-            }
-            
-            let hasAccess = resolvedURL.startAccessingSecurityScopedResource()
-            defer {
-                if hasAccess {
-                    resolvedURL.stopAccessingSecurityScopedResource()
-                }
-            }
-            
-            if hasAccess {
-                let processor = FileProcessor()
-                try await processor.processFile(resolvedURL, outputFormat: selectedFormat)
-                
-                if let result = processor.processingResult {
-                    await MainActor.run {
-                        self.processingResult = result
-                    }
-                }
-            } else {
-                throw ConversionError.fileAccessDenied
-            }
-        }
     }
     
     private func getFormatIcon() -> String {

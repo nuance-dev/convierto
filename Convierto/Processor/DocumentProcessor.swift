@@ -9,15 +9,28 @@ class DocumentProcessor {
             throw ConversionError.documentConversionFailed
         }
         
-        let tempURL = try CacheManager.shared.createTemporaryURL(for: url.lastPathComponent)
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(outputFormat.preferredFilenameExtension ?? "pdf")
         
-        switch outputFormat {
-        case .jpeg, .png:
-            return try await convertPDFToImage(document, originalURL: url, outputFormat: outputFormat, outputURL: tempURL, progress: progress)
-        case .pdf:
-            return try await convertToNewPDF(document, originalURL: url, outputURL: tempURL, progress: progress)
-        default:
-            throw ConversionError.incompatibleFormats
+        do {
+            switch outputFormat {
+            case .jpeg, .png:
+                return try await convertPDFToImage(document, 
+                                                 originalURL: url,
+                                                 outputFormat: outputFormat,
+                                                 outputURL: tempURL,
+                                                 progress: progress)
+            case .pdf:
+                return try await convertToNewPDF(document,
+                                               originalURL: url,
+                                               outputURL: tempURL,
+                                               progress: progress)
+            default:
+                throw ConversionError.incompatibleFormats
+            }
+        } catch {
+            throw ConversionError.documentConversionFailed
         }
     }
     
