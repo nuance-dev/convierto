@@ -14,43 +14,44 @@ struct ResultView: View {
                     .frame(width: 64, height: 64)
                     .shadow(color: Color.black.opacity(0.1), radius: 10, x: 0, y: 5)
                 
-                Image(systemName: result.savedPercentage > 0 ? "checkmark" : "exclamationmark")
-                    .font(.system(size: 24, weight: .medium))
-                    .foregroundColor(result.savedPercentage > 0 ? .green : .orange)
+                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                    .font(.system(size: 32, weight: .medium))
+                    .foregroundColor(.accentColor)
+                    .symbolEffect(
+                        .bounce,
+                        options: .repeating,
+                        value: UUID()
+                    )
             }
             
             // Status Text
             VStack(spacing: 8) {
-                Text(result.savedPercentage > 0 ? "Compression Complete" : "Already Optimized")
+                Text("Conversion Complete")
                     .font(.system(size: 16, weight: .semibold))
                 
-                if result.savedPercentage > 0 {
-                    Text("File size reduced by \(result.savedPercentage)%")
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("No further compression needed")
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary)
-                }
+                Text("Ready to save")
+                    .font(.system(size: 14))
+                    .foregroundColor(.secondary)
             }
             
-            // File Size Info
+            // File Info
             HStack(spacing: 32) {
                 VStack(spacing: 4) {
-                    Text("Original")
+                    Text("Original File")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
-                    Text(formatFileSize(result.originalSize))
+                    Text(result.originalFileName)
                         .font(.system(size: 14, weight: .medium))
+                        .lineLimit(1)
                 }
                 
                 VStack(spacing: 4) {
-                    Text("Compressed")
+                    Text("New File")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
-                    Text(formatFileSize(result.compressedSize))
+                    Text(result.suggestedFileName)
                         .font(.system(size: 14, weight: .medium))
+                        .lineLimit(1)
                 }
             }
             .padding(.vertical, 16)
@@ -64,7 +65,7 @@ struct ResultView: View {
             // Action Buttons
             HStack(spacing: 12) {
                 Button(action: onReset) {
-                    Text("New File")
+                    Text("Convert Another")
                         .font(.system(size: 14, weight: .medium))
                         .frame(maxWidth: .infinity)
                         .frame(height: 36)
@@ -89,13 +90,6 @@ struct ResultView: View {
                 .opacity(0.8)
                 .shadow(color: Color.black.opacity(0.1), radius: 20, x: 0, y: 10)
         )
-    }
-    
-    private func formatFileSize(_ size: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useMB]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: size)
     }
 }
 

@@ -3,7 +3,6 @@ import AppKit
 
 struct MenuBarView: View {
     @ObservedObject var updater: UpdateChecker
-    @EnvironmentObject var menuBarController: MenuBarController
     @Environment(\.dismiss) var dismiss
     
     private var appIcon: NSImage {
@@ -113,9 +112,9 @@ struct MenuBarView: View {
             .padding(.bottom, 16)
             
             Text("Built by [Nuance](https://nuanc.me)")
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
-                            .padding(.bottom, 8)
+                .font(.footnote)
+                .foregroundColor(.secondary)
+                .padding(.bottom, 8)
         }
         .padding(.horizontal)
         .frame(width: 300)

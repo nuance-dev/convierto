@@ -5,7 +5,7 @@ import AppKit
 struct ConviertoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @AppStorage("isDarkMode") private var isDarkMode = false
-    @StateObject private var menuBarController = MenuBarController()
+    @StateObject private var updater = UpdateChecker()
     @State private var showingUpdateSheet = false
     
     var body: some Scene {
@@ -14,17 +14,15 @@ struct ConviertoApp: App {
                 .frame(minWidth: 400, minHeight: 500)
                 .preferredColorScheme(isDarkMode ? .dark : .light)
                 .background(WindowAccessor())
-                .environmentObject(menuBarController)
                 .sheet(isPresented: $showingUpdateSheet) {
-                    MenuBarView(updater: menuBarController.updater)
-                        .environmentObject(menuBarController)
+                    MenuBarView(updater: updater)
                 }
                 .onAppear {
                     // Check for updates when app launches
-                    menuBarController.updater.checkForUpdates()
+                    updater.checkForUpdates()
                     
                     // Set up observer for update availability
-                    menuBarController.updater.onUpdateAvailable = {
+                    updater.onUpdateAvailable = {
                         showingUpdateSheet = true
                     }
                 }
@@ -34,13 +32,13 @@ struct ConviertoApp: App {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates...") {
                     showingUpdateSheet = true
-                    menuBarController.updater.checkForUpdates()
+                    updater.checkForUpdates()
                 }
                 .keyboardShortcut("U", modifiers: [.command])
                 
-                if menuBarController.updater.updateAvailable {
+                if updater.updateAvailable {
                     Button("Download Update") {
-                        if let url = menuBarController.updater.downloadURL {
+                        if let url = updater.downloadURL {
                             NSWorkspace.shared.open(url)
                         }
                     }
