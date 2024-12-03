@@ -14,18 +14,19 @@ struct FileDropDelegate: DropDelegate {
     
     func validateDrop(info: DropInfo) -> Bool {
         logger.debug("Validating drop...")
+        return info.hasItemsConforming(to: [.fileURL])
+    }
+    
+    func performDrop(info: DropInfo) -> Bool {
+        logger.debug("Performing drop")
+        isDragging = false
+        let providers = info.itemProviders(for: [.fileURL])
         
-        guard info.hasItemsConforming(to: [.fileURL]) else {
-            logger.error("Drop items don't conform to fileURL type")
-            return false
+        Task { @MainActor in
+            handleDrop(providers)
         }
         
-        let isValid = info.itemProviders(for: [.fileURL]).allSatisfy { provider in
-            provider.canLoadObject(ofClass: URL.self)
-        }
-        
-        logger.debug("Drop validation result: \(isValid)")
-        return isValid
+        return true
     }
     
     func dropEntered(info: DropInfo) {
@@ -41,18 +42,6 @@ struct FileDropDelegate: DropDelegate {
             isDragging = false
         }
     }
-    
-    func performDrop(info: DropInfo) -> Bool {
-        logger.debug("Performing drop")
-        isDragging = false
-        let providers = info.itemProviders(for: [.fileURL])
-        
-        Task { @MainActor in
-            handleDrop(providers)
-        }
-        
-        return true
-    }
 }
 
 @MainActor
@@ -60,12 +49,16 @@ extension NSItemProvider {
     func loadURL() async throws -> URL? {
         logger.debug("Loading URL from item provider")
         return try await withCheckedThrowingContinuation { continuation in
-            loadItem(forTypeIdentifier: UTType.fileURL.identifier) { item, error in
+            loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { data, error in
                 if let error = error {
                     logger.error("Failed to load URL: \(error.localizedDescription)")
                     continuation.resume(throwing: error)
-                } else if let url = item as? URL {
+                } else if let urlData = data as? Data,
+                          let url = URL(dataRepresentation: urlData, relativeTo: nil) {
                     logger.debug("Successfully loaded URL: \(url.path)")
+                    continuation.resume(returning: url)
+                } else if let url = data as? URL {
+                    logger.debug("Successfully loaded direct URL: \(url.path)")
                     continuation.resume(returning: url)
                 } else {
                     logger.error("Item is not a URL")
