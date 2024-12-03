@@ -6,7 +6,7 @@ A lightweight, native macOS app that intelligently converts files while maintain
 
 ### File Support
 
-- **PDFs**: Smart compression while preserving readability
+- **PDFs**: Smart conversion while preserving readability
 - **Images**: Support for JPEG, PNG, HEIC, TIFF, GIF, BMP, WebP, SVG, RAW, and ICO
 - **Videos**: MP4, MOV, AVI, and other common formats
 - **Audio**: M4V, WAV, MP3, AIFF
@@ -14,7 +14,7 @@ A lightweight, native macOS app that intelligently converts files while maintain
 ### Core Features
 
 - **Multiple Input Methods**: Drag & drop or click to select files
-- **Real-time Progress**: Watch your files being compressed with a clean progress indicator
+- **Real-time Progress**: Watch your files being converted with a clean progress indicator
 - **Dark and Light modes**: Seamlessly integrates with your system preferences
 - **Native Performance**: Built with SwiftUI for optimal macOS integration
 

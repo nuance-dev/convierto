@@ -68,29 +68,28 @@ actor MediaConverter {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = format.fileType
         
-        // Use Task for progress monitoring
-        let progressMonitor = Task.detached { [weak exportSession] in
-            guard let session = exportSession else { return }
+        // Create a separate task for progress monitoring
+        let progressTask = Task.detached {
             repeat {
-                await progressHandler(session.progress)
-                try await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
-            } while await session.status == .exporting
+                await MainActor.run {
+                    progressHandler(exportSession.progress)
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            } while !Task.isCancelled && exportSession.status == .exporting
         }
         
-        // Start export and wait for completion
-        try await withCheckedThrowingContinuation { continuation in
-            exportSession.exportAsynchronously { [weak exportSession] in
-                guard let session = exportSession else {
-                    continuation.resume(throwing: ConversionError.exportFailed)
-                    return
-                }
-                progressMonitor.cancel() // Stop progress monitoring
-                switch session.status {
+        defer { progressTask.cancel() }
+        
+        // Perform the export
+        return try await withCheckedThrowingContinuation { continuation in
+            exportSession.exportAsynchronously {
+                switch exportSession.status {
                 case .completed:
                     continuation.resume()
                 case .failed:
-                    let error = session.error ?? ConversionError.exportFailed
-                    continuation.resume(throwing: error)
+                    continuation.resume(throwing: exportSession.error ?? ConversionError.exportFailed)
+                case .cancelled:
+                    continuation.resume(throwing: ConversionError.exportFailed)
                 default:
                     continuation.resume(throwing: ConversionError.conversionFailed)
                 }

@@ -61,6 +61,7 @@ class FileProcessor: ObservableObject {
     func processFile(_ url: URL, outputFormat: UTType) async throws {
         isProcessing = true
         progress = 0
+        processingResult = nil
         
         do {
             let tempURL = try await convertFile(url, to: outputFormat)
@@ -70,12 +71,14 @@ class FileProcessor: ObservableObject {
                 originalFileName: url.lastPathComponent,
                 outputFormat: outputFormat
             )
+            progress = 1.0
         } catch {
+            isProcessing = false
+            progress = 0
             throw error
         }
         
         isProcessing = false
-        progress = 1.0
     }
     
     private func convertFile(_ url: URL, to outputFormat: UTType) async throws -> URL {
@@ -126,7 +129,14 @@ class FileProcessor: ObservableObject {
             data = bitmapRep.representation(using: .bmp, properties: [:])
         case .heic:
             if #available(macOS 13.0, *) {
-                data = try await convertToHEIC(cgImage: cgImage)
+                let ciImage = CIImage(cgImage: cgImage)
+                let context = CIContext()
+                data = try context.heifRepresentation(
+                    of: ciImage,
+                    format: .RGBA8,
+                    colorSpace: CGColorSpaceCreateDeviceRGB(),
+                    options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: settings.imageQuality]
+                )
             } else {
                 throw ConversionError.unsupportedFormat
             }
@@ -172,11 +182,10 @@ class FileProcessor: ObservableObject {
         
         // Configure video settings if available
         if #available(macOS 13.0, *) {
-            let compressionProperties: [String: Any] = [
-                AVVideoAverageBitRateKey: settings.videoBitRate ?? 2_000_000,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
-            ]
-            exportSession.videoComposition = AVMutableVideoComposition(asset: asset)
+            let videoComposition = AVMutableVideoComposition(asset: asset) { request in
+                request.finish(with: request.sourceImage, context: nil)
+            }
+            exportSession.videoComposition = videoComposition
         }
         
         await exportSession.export()
@@ -216,13 +225,13 @@ class FileProcessor: ObservableObject {
             throw ConversionError.unsupportedFormat
         }
         
-        // Configure audio settings if available
+        // Configure audio settings
         if #available(macOS 13.0, *) {
-            let audioSettings: [String: Any] = [
+            let _ = [
                 AVEncoderBitRateKey: settings.audioBitRate ?? 128_000,
                 AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
             ]
-            exportSession.audioMix = AVMutableAudioMix()
+            // Audio settings are applied through the preset, no need for explicit mix
         }
         
         await exportSession.export()
@@ -266,9 +275,23 @@ class FileProcessor: ObservableObject {
     
     @available(macOS 13.0, *)
     private func convertToHEIC(cgImage: CGImage) async throws -> Data {
-        // HEIC conversion implementation
-        // This is a placeholder - actual implementation would use ImageIO framework
-        throw ConversionError.unsupportedFormat
+        let context = CIContext()
+        let ciImage = CIImage(cgImage: cgImage)
+        
+        guard let colorSpace = cgImage.colorSpace else {
+            throw ConversionError.conversionFailed
+        }
+        
+        let options: [CIImageRepresentationOption: Any] = [
+            kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: settings.imageQuality
+        ]
+        
+        return try context.heifRepresentation(
+            of: ciImage,
+            format: .RGBA8,
+            colorSpace: colorSpace,
+            options: options
+        ) ?? Data()
     }
     
     private func convertPDFToWord(from url: URL, to tempURL: URL) async throws -> URL {

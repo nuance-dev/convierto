@@ -36,6 +36,10 @@ struct FileProcessingState: Identifiable {
 class MultiFileProcessor: ObservableObject {
     @Published private(set) var files: [FileProcessingState] = []
     @Published private(set) var isProcessingMultiple = false
+    @Published var selectedOutputFormat: UTType = .jpeg
+    @Published var progress: Double = 0
+    @Published var isProcessing: Bool = false
+    @Published var processingResult: FileProcessor.ProcessingResult?
     private var processingTasks: [UUID: Task<Void, Never>] = [:]
     
     func addFiles(_ urls: [URL]) {
@@ -100,6 +104,7 @@ class MultiFileProcessor: ObservableObject {
     private func processFileInternal(with id: UUID) async {
         guard let index = files.firstIndex(where: { $0.id == id }) else { return }
         
+        isProcessing = true
         files[index].isProcessing = true
         files[index].progress = 0
         
@@ -115,9 +120,11 @@ class MultiFileProcessor: ObservableObject {
         }
         
         files[index].isProcessing = false
+        isProcessing = files.contains(where: { $0.isProcessing })
+        progress = Double(files.filter { $0.result != nil }.count) / Double(files.count)
     }
     
-    func saveCompressedFile(url: URL, originalName: String) async {
+    func saveConvertedFile(url: URL, originalName: String) async {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
         panel.showsTagField = false
@@ -149,7 +156,7 @@ class MultiFileProcessor: ObservableObject {
     func downloadAllFiles() async {
         for file in files {
             if let result = file.result {
-                await saveCompressedFile(url: result.outputURL, originalName: file.originalFileName)
+                await saveConvertedFile(url: result.outputURL, originalName: file.originalFileName)
             }
         }
     }
@@ -157,7 +164,6 @@ class MultiFileProcessor: ObservableObject {
 
 struct MultiFileView: View {
     @ObservedObject var processor: MultiFileProcessor
-    @Binding var selectedOutputFormat: UTType
     let supportedTypes: [UTType]
     @State private var hoveredFileId: UUID?
     
@@ -184,13 +190,15 @@ struct MultiFileView: View {
                     ForEach(processor.files) { file in
                         FileItemView(
                             file: file,
-                            targetFormat: selectedOutputFormat,
-                            isHovered: hoveredFileId == file.id
-                        ) {
-                            if let index = processor.files.firstIndex(where: { $0.id == file.id }) {
-                                processor.removeFile(at: index)
-                            }
-                        }
+                            targetFormat: processor.selectedOutputFormat,
+                            isHovered: hoveredFileId == file.id,
+                            onRemove: {
+                                if let index = processor.files.firstIndex(where: { $0.id == file.id }) {
+                                    processor.removeFile(at: index)
+                                }
+                            },
+                            processor: processor
+                        )
                         .onHover { isHovered in
                             hoveredFileId = isHovered ? file.id : nil
                         }
@@ -225,10 +233,10 @@ struct MultiFileView: View {
                 // Format selector
                 Menu {
                     ForEach(supportedTypes, id: \.identifier) { format in
-                        Button(action: { selectedOutputFormat = format }) {
+                        Button(action: { processor.selectedOutputFormat = format }) {
                             HStack {
-                                Text(format.localizedDescription)
-                                if format == selectedOutputFormat {
+                                Text(format.localizedDescription ?? "Unknown format")
+                                if format == processor.selectedOutputFormat {
                                     Image(systemName: "checkmark")
                                 }
                             }
@@ -236,7 +244,7 @@ struct MultiFileView: View {
                     }
                 } label: {
                     HStack(spacing: 4) {
-                        Text("Convert to: \(selectedOutputFormat.localizedDescription)")
+                        Text("Convert to: \(processor.selectedOutputFormat.localizedDescription)")
                             .font(.system(size: 13))
                         Image(systemName: "chevron.down")
                             .font(.system(size: 10))
@@ -255,6 +263,7 @@ struct FileItemView: View {
     let targetFormat: UTType
     let isHovered: Bool
     let onRemove: () -> Void
+    @ObservedObject var processor: MultiFileProcessor
     
     var body: some View {
         HStack(spacing: 16) {
@@ -296,7 +305,7 @@ struct FileItemView: View {
                 if let result = file.result {
                     Button(action: {
                         Task {
-                            await processor.saveCompressedFile(url: result.outputURL, originalName: file.originalFileName)
+                            await processor.saveConvertedFile(url: result.outputURL, originalName: file.originalFileName)
                         }
                     }) {
                         Image(systemName: "square.and.arrow.down")
@@ -326,7 +335,8 @@ struct FileItemView: View {
     }
     
     private func getFileIcon() -> String {
-        if file.url.pathExtension.lowercased() == targetFormat.preferredFilenameExtension?.lowercased() {
+        if let preferredExtension = targetFormat.preferredFilenameExtension,
+           file.url.pathExtension.lowercased() == preferredExtension.lowercased() {
             return "doc.circle"
         }
         return "arrow.triangle.2.circlepath"
