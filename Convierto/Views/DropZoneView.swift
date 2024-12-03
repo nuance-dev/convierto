@@ -27,75 +27,54 @@ struct DropZoneView: View {
     
     private func handleDrop(providers: [NSItemProvider]) async throws {
         for provider in providers {
-            let wrapper = SendableWrapper(provider)
+            guard provider.canLoadObject(ofClass: URL.self) else {
+                throw DropZoneError.invalidInput("This file type isn't supported")
+            }
             
-            do {
-                guard wrapper.canLoadObject else {
-                    throw DropZoneError.invalidInput("This file can't be processed")
-                }
-                
-                guard let url = try await wrapper.loadItem(forTypeIdentifier: UTType.fileURL.identifier) else {
-                    throw DropZoneError.invalidInput("Unable to access this file")
-                }
-                
-                // File security and access handling
-                let (resolvedURL, hasAccess) = try await securelyAccessFile(url)
-                
-                defer {
-                    if hasAccess {
-                        resolvedURL.stopAccessingSecurityScopedResource()
-                    }
-                }
-                
+            guard let url = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? URL else {
+                throw DropZoneError.invalidInput("Unable to access this file")
+            }
+            
+            // Create security-scoped bookmark
+            let bookmarkData = try url.bookmarkData(
+                options: .withSecurityScope,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            
+            var isStale = false
+            guard let resolvedURL = try? URL(
+                resolvingBookmarkData: bookmarkData,
+                options: .withSecurityScope,
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            ) else {
+                throw DropZoneError.fileAccessDenied("Please allow access to this file")
+            }
+            
+            // Start accessing the security-scoped resource
+            let hasAccess = resolvedURL.startAccessingSecurityScopedResource()
+            defer {
                 if hasAccess {
-                    let processor = FileProcessor()
-                    try await processor.processFile(resolvedURL, outputFormat: selectedFormat)
-                    
-                    if let result = processor.processingResult {
-                        await MainActor.run {
-                            self.processingResult = result
-                            self.showError = false
-                            self.errorMessage = nil
-                        }
-                    }
-                } else {
-                    throw DropZoneError.fileAccessDenied("Please allow access to this file")
+                    resolvedURL.stopAccessingSecurityScopedResource()
                 }
-            } catch {
-                await MainActor.run {
-                    self.errorMessage = error.localizedDescription
-                    self.showError = true
-                    
-                    // Auto-hide error after 3 seconds with smooth animation
-                    withAnimation(.easeInOut(duration: 0.3).delay(3)) {
+            }
+            
+            if hasAccess {
+                let processor = FileProcessor()
+                try await processor.processFile(resolvedURL, outputFormat: selectedFormat)
+                
+                if let result = processor.processingResult {
+                    await MainActor.run {
+                        self.processingResult = result
                         self.showError = false
                         self.errorMessage = nil
                     }
                 }
+            } else {
+                throw DropZoneError.fileAccessDenied("Unable to access this file")
             }
         }
-    }
-    
-    // Helper function to securely access files
-    private func securelyAccessFile(_ url: URL) async throws -> (URL, Bool) {
-        var isStale = false
-        let bookmarkData = try url.bookmarkData(
-            options: .withSecurityScope,
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        )
-        
-        guard let resolvedURL = try? URL(
-            resolvingBookmarkData: bookmarkData,
-            options: .withSecurityScope,
-            relativeTo: nil,
-            bookmarkDataIsStale: &isStale
-        ) else {
-            throw DropZoneError.fileAccessDenied("Unable to access this file")
-        }
-        
-        let hasAccess = resolvedURL.startAccessingSecurityScopedResource()
-        return (resolvedURL, hasAccess)
     }
     
     var body: some View {
