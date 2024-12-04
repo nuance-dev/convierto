@@ -171,9 +171,9 @@ struct ContentView: View {
     @State private var isMultiFileMode = false
     
     private let supportedTypes: [UTType] = [
-        .jpeg, .tiff, .png, .heic, .gif, .bmp,
-        .mpeg4Movie, .quickTimeMovie,
-        .mpeg4Audio, .mp3, .wav,
+        .jpeg, .png, .heic, .tiff, .gif, .bmp, .webP,
+        .mpeg4Movie, .quickTimeMovie, .avi,
+        .mp3, .wav, .aiff, .m4a, .aac,
         .pdf
     ]
     
@@ -181,17 +181,17 @@ struct ContentView: View {
         switch operation {
         case "output":
             return [
-                "Images": [.jpeg, .png, .heic, .tiff, .gif, .webP],
+                "Images": [.jpeg, .png, .heic, .tiff, .gif, .webP, .bmp],
                 "Documents": [.pdf],
-                "Video": [.mpeg4Movie, .quickTimeMovie],
-                "Audio": [.mp3, .wav, .aiff]
+                "Video": [.mpeg4Movie, .quickTimeMovie, .avi],
+                "Audio": [.mp3, .wav, .aiff, .m4a, .aac]
             ]
         case "input":
             return [
-                "Images": [.jpeg, .png, .heic, .tiff, .gif, .webP],
+                "Images": [.jpeg, .png, .heic, .tiff, .gif, .webP, .bmp, .raw],
                 "Documents": [.pdf],
-                "Video": [.mpeg4Movie, .quickTimeMovie, .avi],
-                "Audio": [.mp3, .wav, .aiff, .mpeg4Audio]
+                "Video": [.mpeg4Movie, .quickTimeMovie, .avi, .mpeg2Video],
+                "Audio": [.mp3, .wav, .aiff, .m4a, .aac, .midi]
             ]
         default:
             return [:]
@@ -350,29 +350,52 @@ func getFormatIcon(for format: UTType) -> String {
 }
 
 private func checkFormatCompatibility(input: UTType, output: UTType) -> Bool {
-    // Define format compatibility rules
-    let imageFormats: Set<UTType> = [.jpeg, .png, .tiff, .gif, .heic, .webP]
+    // Define format categories
+    let imageFormats: Set<UTType> = [.jpeg, .png, .tiff, .gif, .heic, .webP, .bmp]
     let videoFormats: Set<UTType> = [.mpeg4Movie, .quickTimeMovie, .avi]
-    let audioFormats: Set<UTType> = [.mp3, .wav, .aiff, .mpeg4Audio]
+    let audioFormats: Set<UTType> = [.mp3, .wav, .aiff, .m4a, .aac]
     
-    // PDF special cases
-    if input == .pdf && imageFormats.contains(output) {
+    // Enhanced cross-format conversion support
+    switch (input, output) {
+    // PDF conversions
+    case (.pdf, _) where imageFormats.contains(output):
         return true
-    }
-    if imageFormats.contains(input) && output == .pdf {
+    case (_, .pdf) where imageFormats.contains(input):
         return true
-    }
-    
-    // Check if formats are in the same category
-    if imageFormats.contains(input) && imageFormats.contains(output) {
+        
+    // Audio-Video conversions
+    case (let i, let o) where i.conforms(to: .audio) && o.conforms(to: .audiovisualContent):
         return true
-    }
-    if videoFormats.contains(input) && videoFormats.contains(output) {
+    case (let i, let o) where i.conforms(to: .audiovisualContent) && o.conforms(to: .audio):
         return true
-    }
-    if audioFormats.contains(input) && audioFormats.contains(output) {
+        
+    // Image-Video conversions
+    case (let i, let o) where i.conforms(to: .image) && o.conforms(to: .audiovisualContent):
         return true
+    case (let i, let o) where i.conforms(to: .audiovisualContent) && o.conforms(to: .image):
+        return true
+        
+    // Image sequence to video
+    case (let i, let o) where imageFormats.contains(i) && videoFormats.contains(o):
+        return true
+        
+    // Video to image sequence
+    case (let i, let o) where videoFormats.contains(i) && imageFormats.contains(o):
+        return true
+        
+    // Audio visualization
+    case (let i, let o) where audioFormats.contains(i) && (videoFormats.contains(o) || imageFormats.contains(o)):
+        return true
+        
+    // Same category conversions
+    case (let i, let o) where i.conforms(to: .image) && o.conforms(to: .image):
+        return true
+    case (let i, let o) where i.conforms(to: .audio) && o.conforms(to: .audio):
+        return true
+    case (let i, let o) where i.conforms(to: .audiovisualContent) && o.conforms(to: .audiovisualContent):
+        return true
+        
+    default:
+        return false
     }
-    
-    return false
 }

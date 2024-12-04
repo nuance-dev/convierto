@@ -116,38 +116,25 @@ class ImageProcessor {
         if settings.enhanceImage {
             if let filter = CIFilter(name: "CIPhotoEffectInstant") {
                 filter.setValue(processedImage, forKey: kCIInputImageKey)
-                if let output = filter.outputImage {
-                    processedImage = output
-                }
+                processedImage = filter.outputImage ?? processedImage
             }
         }
         
         if settings.adjustColors {
-            if let colorControls = CIFilter(name: "CIColorControls") {
-                colorControls.setValue(processedImage, forKey: kCIInputImageKey)
-                colorControls.setValue(settings.saturation, forKey: kCIInputSaturationKey)
-                colorControls.setValue(settings.brightness, forKey: kCIInputBrightnessKey)
-                colorControls.setValue(settings.contrast, forKey: kCIInputContrastKey)
-                if let output = colorControls.outputImage {
-                    processedImage = output
-                }
+            if let filter = CIFilter(name: "CIColorControls") {
+                filter.setValue(processedImage, forKey: kCIInputImageKey)
+                filter.setValue(settings.saturation, forKey: kCIInputSaturationKey)
+                filter.setValue(settings.brightness, forKey: kCIInputBrightnessKey)
+                filter.setValue(settings.contrast, forKey: kCIInputContrastKey)
+                processedImage = filter.outputImage ?? processedImage
             }
         }
         
-        if settings.resizeImage {
-            let scale = min(
-                settings.targetSize.width / CGFloat(image.width),
-                settings.targetSize.height / CGFloat(image.height)
-            )
-            let transform = CGAffineTransform(scaleX: scale, y: scale)
-            processedImage = processedImage.transformed(by: transform)
+        guard let cgImage = ciContext.createCGImage(processedImage, from: processedImage.extent) else {
+            throw ConversionError.conversionFailed
         }
         
-        if let outputCGImage = ciContext.createCGImage(processedImage, from: processedImage.extent) {
-            return outputCGImage
-        }
-        
-        throw ConversionError.conversionFailed
+        return cgImage
     }
     
     private func convertToVideo(imageSource: CGImageSource, format: UTType, progress: Progress, inputURL: URL) async throws -> ProcessingResult {

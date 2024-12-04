@@ -43,8 +43,12 @@ class VideoProcessor: BaseConverter, MediaConverting {
     }
     
     func convert(_ url: URL, to format: UTType, progress: Progress) async throws -> ProcessingResult {
-        let asset = AVAsset(url: url)
+        // Handle audio to video conversion
+        if try await isAudioFile(url) && format.conforms(to: .audiovisualContent) {
+            return try await convertAudioToVideo(url, format: format, progress: progress)
+        }
         
+        let asset = AVAsset(url: url)
         guard try await asset.load(.isPlayable) else {
             throw ConversionError.invalidInput
         }
@@ -58,11 +62,13 @@ class VideoProcessor: BaseConverter, MediaConverting {
             return try await extractAudio(from: asset, to: format, progress: progress)
         }
         
-        // Standard video conversion
+        // Create composition for standard video conversion
         let composition = AVMutableComposition()
+        let videoTrack = try? await asset.loadTracks(withMediaType: .video).first
+        let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first
         
-        // Add video track if target format supports video
-        if let videoTrack = try? await asset.loadTracks(withMediaType: .video).first,
+        // Add video track if available
+        if let videoTrack = videoTrack,
            let compositionVideoTrack = composition.addMutableTrack(
             withMediaType: .video,
             preferredTrackID: kCMPersistentTrackID_Invalid
@@ -71,8 +77,8 @@ class VideoProcessor: BaseConverter, MediaConverting {
             try compositionVideoTrack.insertTimeRange(timeRange, of: videoTrack, at: .zero)
         }
         
-        // Add audio track
-        if let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first,
+        // Add audio track if available
+        if let audioTrack = audioTrack,
            let compositionAudioTrack = composition.addMutableTrack(
             withMediaType: .audio,
             preferredTrackID: kCMPersistentTrackID_Invalid
@@ -81,47 +87,48 @@ class VideoProcessor: BaseConverter, MediaConverting {
             try compositionAudioTrack.insertTimeRange(timeRange, of: audioTrack, at: .zero)
         }
         
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension(format.preferredFilenameExtension ?? "mp4")
+        return try await finalizeVideoConversion(composition: composition, format: format, progress: progress)
+    }
+    
+    private func convertAudioToVideo(_ url: URL, format: UTType, progress: Progress) async throws -> ProcessingResult {
+        let asset = AVAsset(url: url)
+        let duration = try await asset.load(.duration)
         
-        guard let exportSession = try await createExportSession(
-            for: composition,
-            outputFormat: format,
-            isAudioOnly: format.conforms(to: .audio)
-        ) else {
-            throw ConversionError.exportFailed
+        // Create video composition
+        let composition = AVMutableComposition()
+        
+        // Add audio track
+        if let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first,
+           let compositionAudioTrack = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+           ) {
+            let timeRange = CMTimeRange(start: .zero, duration: duration)
+            try compositionAudioTrack.insertTimeRange(timeRange, of: audioTrack, at: .zero)
         }
         
-        exportSession.outputURL = outputURL
-        exportSession.outputFileType = getAVFileType(for: format)
-        
-        if !format.conforms(to: .audio) {
-            exportSession.videoComposition = try await createVideoComposition(for: composition)
-        }
-        
-        // Monitor progress
-        let progressTimer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
-        let progressObserver = progressTimer.sink { _ in
-            progress.completedUnitCount = Int64(exportSession.progress * 100)
-        }
-        
-        defer {
-            progressObserver.cancel()
-        }
-        
-        await exportSession.export()
-        
-        guard exportSession.status == .completed else {
-            throw exportSession.error ?? ConversionError.exportFailed
-        }
-        
-        return ProcessingResult(
-            outputURL: outputURL,
-            originalFileName: url.lastPathComponent,
-            suggestedFileName: url.deletingPathExtension().lastPathComponent + "." + (format.preferredFilenameExtension ?? "mp4"),
-            fileType: format
+        // Create visualization frames
+        let frames = try await audioVisualizer.generateVisualizationFrames(
+            for: asset,
+            frameCount: Int(duration.seconds * Double(settings.frameRate))
         )
+        
+        // Add video track with visualization
+        if let compositionVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) {
+            let videoSize = CGSize(width: 1920, height: 1080)
+            let videoInfo = [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: videoSize.width,
+                AVVideoHeightKey: videoSize.height
+            ] as [String: Any]
+            
+            try await insertVisualizationFrames(frames, into: compositionVideoTrack, frameRate: settings.frameRate)
+        }
+        
+        return try await finalizeVideoConversion(composition: composition, format: format, progress: progress)
     }
     
     private func convertVideoToImage(asset: AVAsset, format: UTType, progress: Progress) async throws -> ProcessingResult {
@@ -196,23 +203,77 @@ class VideoProcessor: BaseConverter, MediaConverting {
         )
     }
     
+    private func finalizeVideoConversion(composition: AVComposition, format: UTType, progress: Progress) async throws -> ProcessingResult {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(format.preferredFilenameExtension ?? "mp4")
+        
+        guard let exportSession = try await createExportSession(
+            for: composition,
+            outputFormat: format,
+            isAudioOnly: format.conforms(to: .audio)
+        ) else {
+            throw ConversionError.exportFailed
+        }
+        
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = getAVFileType(for: format)
+        
+        if !format.conforms(to: .audio) {
+            exportSession.videoComposition = try await createVideoComposition(for: composition)
+        }
+        
+        // Monitor progress
+        let progressTimer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+        let progressObserver = progressTimer.sink { _ in
+            progress.completedUnitCount = Int64(exportSession.progress * 100)
+        }
+        
+        defer {
+            progressObserver.cancel()
+        }
+        
+        await exportSession.export()
+        
+        guard exportSession.status == .completed else {
+            throw exportSession.error ?? ConversionError.exportFailed
+        }
+        
+        return ProcessingResult(
+            outputURL: outputURL,
+            originalFileName: "video.mp4",
+            suggestedFileName: "video." + (format.preferredFilenameExtension ?? "mp4"),
+            fileType: format
+        )
+    }
+    
     private func createVideoComposition(for composition: AVComposition) async throws -> AVMutableVideoComposition {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         
+        // Default render size if no video track exists
+        var renderSize = CGSize(width: 1920, height: 1080)
+        
         if let videoTrack = try? await composition.loadTracks(withMediaType: .video).first {
-            let size = try? await videoTrack.load(.naturalSize)
-            videoComposition.renderSize = size ?? CGSize(width: 1920, height: 1080)
-            
-            let instruction = AVMutableVideoCompositionInstruction()
-            instruction.timeRange = CMTimeRange(start: .zero, duration: composition.duration)
-            
-            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
-            instruction.layerInstructions = [layerInstruction]
-            
-            videoComposition.instructions = [instruction]
+            if let size = try? await videoTrack.load(.naturalSize) {
+                renderSize = size
+            }
         }
         
+        // Ensure positive render size
+        renderSize.width = max(renderSize.width, 640)
+        renderSize.height = max(renderSize.height, 480)
+        videoComposition.renderSize = renderSize
+        
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: composition.duration)
+        
+        if let videoTrack = try? await composition.loadTracks(withMediaType: .video).first {
+            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
+            instruction.layerInstructions = [layerInstruction]
+        }
+        
+        videoComposition.instructions = [instruction]
         return videoComposition
     }
     
@@ -281,5 +342,106 @@ class VideoProcessor: BaseConverter, MediaConverting {
         await videoWriter.finishWriting()
         
         return outputURL
+    }
+    
+    private func isAudioFile(_ url: URL) async throws -> Bool {
+        let asset = AVAsset(url: url)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        return !audioTracks.isEmpty && videoTracks.isEmpty
+    }
+    
+    private func insertVisualizationFrames(_ frames: [CGImage], into track: AVMutableCompositionTrack, frameRate: Int) async throws {
+        let frameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+        
+        for (index, frame) in frames.enumerated() {
+            let time = CMTime(value: CMTimeValue(index), timescale: CMTimeScale(frameRate))
+            let nsImage = NSImage(cgImage: frame, size: NSSize(width: frame.width, height: frame.height))
+            try await insertFrame(nsImage, at: time, duration: frameDuration, into: track)
+        }
+    }
+    
+    private func insertFrame(_ image: NSImage, at time: CMTime, duration: CMTime, into track: AVMutableCompositionTrack) async throws {
+        let frameAsset = try await createAssetFromImage(image)
+        guard let videoTrack = try? await frameAsset.loadTracks(withMediaType: .video).first else {
+            throw ConversionError.conversionFailed
+        }
+        
+        try track.insertTimeRange(
+            CMTimeRange(start: .zero, duration: duration),
+            of: videoTrack,
+            at: time
+        )
+    }
+    
+    private func createAssetFromImage(_ image: NSImage) async throws -> AVAsset {
+        let frameURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mov")
+        
+        let writer = try AVAssetWriter(url: frameURL, fileType: .mov)
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(image.size.width),
+            AVVideoHeightKey: Int(image.size.height)
+        ]
+        
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        writer.add(input)
+        
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB)
+            ]
+        )
+        
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+        
+        if let buffer = try await createPixelBuffer(from: image) {
+            adaptor.append(buffer, withPresentationTime: .zero)
+        }
+        
+        input.markAsFinished()
+        await writer.finishWriting()
+        
+        return AVAsset(url: frameURL)
+    }
+    
+    private func createPixelBuffer(from image: NSImage) async throws -> CVPixelBuffer? {
+        var pixelBuffer: CVPixelBuffer?
+        let width = Int(image.size.width)
+        let height = Int(image.size.height)
+        
+        CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_32ARGB,
+            nil,
+            &pixelBuffer
+        )
+        
+        guard let buffer = pixelBuffer else { return nil }
+        
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        
+        guard let context = CGContext(
+            data: CVPixelBufferGetBaseAddress(buffer),
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+        ),
+        let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+        
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return buffer
     }
 }

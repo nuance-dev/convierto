@@ -22,6 +22,7 @@ enum ConversionError: LocalizedError {
     case documentConversionFailed
     case fileAccessDenied
     case sandboxViolation
+    case processingFailed
     
     var errorDescription: String? {
         switch self {
@@ -49,6 +50,8 @@ enum ConversionError: LocalizedError {
             return "Unable to access the file. Please check permissions."
         case .sandboxViolation:
             return "Cannot access this file due to system security. Try moving it to a different location."
+        case .processingFailed:
+            return "Failed to process the media file"
         }
     }
 }
@@ -137,42 +140,35 @@ class FileProcessor: ObservableObject {
         do {
             let result: ProcessingResult
             
-            // Handle PDF to Image conversion
-            if inputType.conforms(to: .pdf) && outputFormat.conforms(to: .image) {
-                logger.debug("Converting PDF to Image")
-                result = try await documentProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-            }
-            // Handle Image to PDF conversion
-            else if inputType.conforms(to: .image) && outputFormat == .pdf {
-                logger.debug("Converting Image to PDF")
-                result = try await documentProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-            }
-            // Handle video conversion
-            else if inputType.conforms(to: .audiovisualContent) {
-                logger.debug("Converting Video")
-                result = try await videoProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-            }
-            // Handle audio conversion
-            else if inputType.conforms(to: .audio) {
-                logger.debug("Converting Audio")
+            switch (inputType, outputFormat) {
+            // Audio to Video conversion
+            case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .audiovisualContent):
                 result = try await audioProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-            }
-            // Handle image conversion
-            else if inputType.conforms(to: .image) {
-                logger.debug("Converting Image")
+                
+            // Video to Audio extraction
+            case (let input, let output) where input.conforms(to: .audiovisualContent) && output.conforms(to: .audio):
+                result = try await videoProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
+                
+            // Image to Video conversion
+            case (let input, let output) where input.conforms(to: .image) && output.conforms(to: .audiovisualContent):
                 result = try await imageProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-            }
-            else {
-                logger.error("Incompatible formats: \(inputType.identifier) → \(outputFormat.identifier)")
+                
+            // Video to Image sequence
+            case (let input, let output) where input.conforms(to: .audiovisualContent) && output.conforms(to: .image):
+                result = try await videoProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
+                
+            // Standard conversions
+            case (let input, _) where input.conforms(to: .audio):
+                result = try await audioProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
+            case (let input, _) where input.conforms(to: .audiovisualContent):
+                result = try await videoProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
+            case (let input, _) where input.conforms(to: .image):
+                result = try await imageProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
+            default:
                 throw ConversionError.incompatibleFormats
             }
             
-            logger.info("Conversion successful: \(result.outputURL.lastPathComponent)")
-            await MainActor.run {
-                self.processingResult = result
-            }
             return result
-            
         } catch {
             logger.error("Conversion failed: \(error.localizedDescription)")
             throw error

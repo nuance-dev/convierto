@@ -107,7 +107,7 @@ class DocumentProcessor: BaseConverter, MediaConverting {
         let pdfDocument = PDFDocument()
         
         // Create PDF page from image
-        let imageRect = CGRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
+        _ = CGRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
         guard let pdfPage = PDFPage(image: image) else {
             throw ConversionError.conversionFailed
         }
