@@ -271,7 +271,7 @@ struct ContentView: View {
             processor.addFiles(urls)
         } else if let url = urls.first {
             do {
-                let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+                let resourceValues = try url.resourceValues(forKeys: [.contentTypeKey])
                 guard let inputType = resourceValues.contentType else {
                     throw ConversionError.invalidInput
                 }
