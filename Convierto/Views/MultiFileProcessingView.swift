@@ -60,13 +60,14 @@ class MultiFileProcessor: ObservableObject {
         files.remove(at: index)
     }
     
-    func clearFiles() {
+    func clearFiles(completion: (() -> Void)? = nil) {
         // Cancel all ongoing processing tasks
         for task in processingTasks.values {
             task.cancel()
         }
         processingTasks.removeAll()
         files.removeAll()
+        completion?()
     }
     
     private func processFile(with id: UUID) {
@@ -111,8 +112,9 @@ class MultiFileProcessor: ObservableObject {
         
         do {
             let processor = FileProcessor()
-            try await processor.processFile(fileState.url, outputFormat: selectedOutputFormat)
-            if let result = processor.processingResult {
+            let result = try await processor.processFile(fileState.url, outputFormat: selectedOutputFormat)
+            
+            if !Task.isCancelled {
                 files[index].result = result
                 files[index].progress = 1.0
             }
@@ -170,6 +172,7 @@ struct MultiFileView: View {
     @ObservedObject var processor: MultiFileProcessor
     let supportedTypes: [UTType]
     @State private var hoveredFileId: UUID?
+    let onReset: () -> Void
     
     var body: some View {
         VStack(spacing: 24) {
@@ -180,7 +183,13 @@ struct MultiFileView: View {
                 
                 Spacer()
                 
-                Button(action: { processor.clearFiles() }) {
+                Button(action: {
+                    withAnimation(.spring(response: 0.3)) {
+                        processor.clearFiles {
+                            onReset()
+                        }
+                    }
+                }) {
                     Text("Clear All")
                         .font(.system(size: 13))
                         .foregroundColor(.secondary)

@@ -168,13 +168,35 @@ struct ContentView: View {
     @State private var showError = false
     @State private var errorMessage: String?
     @State private var selectedOutputFormat: UTType = .jpeg
+    @State private var isMultiFileMode = false
     
-    let supportedTypes: [String: [UTType]] = [
-        "Images": [.jpeg, .tiff, .png, .heic, .gif, .bmp, .webP],
-        "Video": [.mpeg4Movie, .quickTimeMovie, .avi],
-        "Audio": [.mpeg4Audio, .mp3, .wav, .aiff],
-        "Documents": [.pdf]
+    private let supportedTypes: [UTType] = [
+        .jpeg, .tiff, .png, .heic, .gif, .bmp,
+        .mpeg4Movie, .quickTimeMovie,
+        .mpeg4Audio, .mp3, .wav,
+        .pdf
     ]
+    
+    private func supportedFormats(for operation: String) -> [String: [UTType]] {
+        switch operation {
+        case "output":
+            return [
+                "Images": [.jpeg, .png, .heic, .tiff, .gif, .webP],
+                "Documents": [.pdf],
+                "Video": [.mpeg4Movie, .quickTimeMovie],
+                "Audio": [.mp3, .wav, .aiff]
+            ]
+        case "input":
+            return [
+                "Images": [.jpeg, .png, .heic, .tiff, .gif, .webP],
+                "Documents": [.pdf],
+                "Video": [.mpeg4Movie, .quickTimeMovie, .avi],
+                "Audio": [.mp3, .wav, .aiff, .mpeg4Audio]
+            ]
+        default:
+            return [:]
+        }
+    }
     
     var body: some View {
         ZStack {
@@ -183,7 +205,19 @@ struct ContentView: View {
                 .ignoresSafeArea()
             
             VStack(spacing: 24) {
-                if processor.isProcessing {
+                if isMultiFileMode {
+                    MultiFileView(
+                        processor: processor,
+                        supportedTypes: supportedTypes,
+                        onReset: {
+                            withAnimation(.spring(response: 0.3)) {
+                                isMultiFileMode = false
+                                processor.processingResult = nil
+                            }
+                        }
+                    )
+                    .transition(.opacity)
+                } else if processor.isProcessing {
                     ProcessingView(progress: processor.progress)
                         .transition(.opacity)
                 } else if let result = processor.processingResult {
@@ -195,21 +229,19 @@ struct ContentView: View {
                         withAnimation(.spring(response: 0.3)) {
                             processor.processingResult = nil
                             processor.progress = 0
+                            isMultiFileMode = false
                         }
                     }
                     .transition(.opacity)
                 } else {
                     VStack(spacing: 32) {
-                        // Output format selector
-                        OutputFormatSelector(
+                        FormatSelectorView(
+                            selectedInputFormat: nil,
                             selectedOutputFormat: $selectedOutputFormat,
-                            supportedTypes: supportedTypes,
-                            showError: showError,
-                            errorMessage: errorMessage
+                            supportedTypes: supportedFormats(for: "output")
                         )
                         .padding(.top, 8)
                         
-                        // Drop zone
                         DropZoneView(
                             isDragging: $isDragging,
                             showError: $showError,
@@ -230,33 +262,48 @@ struct ContentView: View {
     
     @MainActor
     private func handleSelectedFiles(_ urls: [URL]) async {
-        guard let url = urls.first else { return }
-        
-        do {
-            let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
-            guard let inputType = resourceValues.contentType else {
-                throw ConversionError.invalidInput
-            }
-            
-            // Create a FileProcessor instance
-            let fileProcessor = FileProcessor()
-            let result = try await fileProcessor.processFile(url, outputFormat: selectedOutputFormat)
-            
+        if urls.count > 1 {
             withAnimation(.spring(response: 0.3)) {
-                processor.isProcessing = false
-                processor.processingResult = result
+                isMultiFileMode = true
+                processor.clearFiles()
+                processor.selectedOutputFormat = selectedOutputFormat
             }
-        } catch {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                errorMessage = error.localizedDescription
-                showError = true
-            }
-            
-            // Auto-hide error after 3 seconds
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            processor.addFiles(urls)
+        } else if let url = urls.first {
+            do {
+                let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+                guard let inputType = resourceValues.contentType else {
+                    throw ConversionError.invalidInput
+                }
+                
+                // Validate input type
+                let allSupportedTypes = supportedFormats(for: "input").values.flatMap { $0 }
+                guard allSupportedTypes.contains(where: { inputType.conforms(to: $0) }) else {
+                    throw ConversionError.unsupportedFormat
+                }
+                
                 withAnimation {
-                    showError = false
-                    errorMessage = nil
+                    processor.isProcessing = true
+                }
+                
+                let fileProcessor = FileProcessor()
+                let result = try await fileProcessor.processFile(url, outputFormat: selectedOutputFormat)
+                
+                withAnimation(.spring(response: 0.3)) {
+                    processor.isProcessing = false
+                    processor.processingResult = result
+                }
+            } catch {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    errorMessage = error.localizedDescription
+                    showError = true
+                }
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    withAnimation {
+                        showError = false
+                        errorMessage = nil
+                    }
                 }
             }
         }
