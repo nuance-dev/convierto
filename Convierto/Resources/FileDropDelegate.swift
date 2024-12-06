@@ -81,8 +81,7 @@ class FileDropHandler {
         
         for provider in providers {
             guard provider.canLoadObject(ofClass: URL.self) else { 
-                logger.error("Provider cannot load URL")
-                continue 
+                throw ConversionError.invalidInput
             }
             
             if let url = try await provider.loadURL() {
@@ -103,12 +102,12 @@ class FileDropHandler {
                     bookmarkDataIsStale: &isStale
                 ) else {
                     logger.error("Failed to resolve bookmark for URL: \(url.path)")
-                    throw ConversionError.fileAccessDenied
+                    throw ConversionError.fileAccessDenied(path: url.path)
                 }
                 
                 guard resolvedURL.startAccessingSecurityScopedResource() else {
                     logger.error("Failed to access security-scoped resource: \(resolvedURL.path)")
-                    throw ConversionError.sandboxViolation
+                    throw ConversionError.sandboxViolation(reason: "Cannot access security-scoped resource")
                 }
                 
                 defer {
@@ -118,7 +117,7 @@ class FileDropHandler {
                 // Verify file exists and is readable
                 guard FileManager.default.isReadableFile(atPath: resolvedURL.path) else {
                     logger.error("File is not readable: \(resolvedURL.path)")
-                    throw ConversionError.fileAccessDenied
+                    throw ConversionError.fileAccessDenied(path: resolvedURL.path)
                 }
                 
                 urls.append(resolvedURL)
@@ -126,7 +125,6 @@ class FileDropHandler {
         }
         
         guard !urls.isEmpty else {
-            logger.error("No valid URLs processed")
             throw ConversionError.invalidInput
         }
         

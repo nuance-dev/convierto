@@ -65,44 +65,40 @@ class AudioVisualizer {
         reader.timeRange = CMTimeRange(start: time, duration: CMTime(seconds: windowSize, preferredTimescale: 600))
         
         guard reader.canAdd(output) else {
-            throw ConversionError.conversionFailed
+            throw ConversionError.conversionFailed(reason: "Cannot add output to reader")
         }
         
         reader.add(output)
-        reader.startReading()
+        
+        guard reader.startReading() else {
+            throw ConversionError.conversionFailed(reason: "Failed to start reading audio")
+        }
         
         var samples: [Float] = []
-        while let buffer = output.copyNextSampleBuffer() {
-            let audioBuffer = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-                buffer,
-                bufferListSizeNeededOut: nil,
-                bufferListOut: nil,
-                bufferListSize: 0,
-                blockBufferAllocator: nil,
-                blockBufferMemoryAllocator: nil,
-                flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-                blockBufferOut: nil
+        while let sampleBuffer = output.copyNextSampleBuffer() {
+            guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
+            
+            var length = 0
+            var dataPointer: UnsafeMutablePointer<Int8>?
+            let status = CMBlockBufferGetDataPointer(
+                blockBuffer,
+                atOffset: 0,
+                lengthAtOffsetOut: nil,
+                totalLengthOut: &length,
+                dataPointerOut: &dataPointer
             )
             
-            if let blockBuffer = CMSampleBufferGetDataBuffer(buffer) {
-                var length = 0
-                var dataPointer: UnsafeMutablePointer<Int8>?
-                CMBlockBufferGetDataPointer(
-                    blockBuffer,
-                    atOffset: 0,
-                    lengthAtOffsetOut: nil,
-                    totalLengthOut: &length,
-                    dataPointerOut: &dataPointer
-                )
-                
-                if let pointer = dataPointer {
-                    let bufferPointer = UnsafeBufferPointer<Float>(
-                        start: UnsafePointer<Float>(OpaquePointer(pointer)),
-                        count: length / MemoryLayout<Float>.stride
-                    )
-                    samples.append(contentsOf: bufferPointer)
-                }
-            }
+            guard status == kCMBlockBufferNoErr, let pointer = dataPointer else { continue }
+            
+            let bufferPointer = UnsafeBufferPointer<Float>(
+                start: UnsafePointer<Float>(OpaquePointer(pointer)),
+                count: length / MemoryLayout<Float>.stride
+            )
+            samples.append(contentsOf: bufferPointer)
+        }
+        
+        if samples.isEmpty {
+            throw ConversionError.conversionFailed(reason: "No audio samples extracted")
         }
         
         return samples
@@ -253,17 +249,21 @@ class AudioVisualizer {
         
         let asset = AVAsset(url: frameURL)
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
-            throw ConversionError.conversionFailed
+            throw ConversionError.conversionFailed(reason: "No video track found")
         }
         
         return videoTrack
     }
     
     func generateWaveformImage(for asset: AVAsset, size: CGSize) async throws -> CGImage {
-        let samples = try await extractAudioSamples(from: asset, at: .zero, windowSize: try await asset.load(.duration).seconds)
+        let samples = try await extractAudioSamples(
+            from: asset,
+            at: .zero,
+            windowSize: try await asset.load(.duration).seconds
+        )
         
         guard let frame = try await generateVisualizationFrame(from: samples) else {
-            throw ConversionError.conversionFailed
+            throw ConversionError.conversionFailed(reason: "Failed to generate visualization frame")
         }
         
         return frame

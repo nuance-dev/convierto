@@ -101,4 +101,17 @@ class CacheManager {
             }
         }
     }
+    
+    func createTemporaryFile(withExtension ext: String) async throws -> URL {
+        let filename = "\(UUID().uuidString).\(ext)"
+        let fileURL = cacheDirectory.appendingPathComponent(filename)
+        
+        // Ensure the directory exists
+        try FileManager.default.createDirectory(
+            at: cacheDirectory,
+            withIntermediateDirectories: true
+        )
+        
+        return fileURL
+    }
 }

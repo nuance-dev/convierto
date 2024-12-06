@@ -218,7 +218,7 @@ struct ContentView: View {
                     )
                     .transition(.opacity)
                 } else if processor.isProcessing {
-                    ProcessingView(progress: processor.progress)
+                    ProcessingView()
                         .transition(.opacity)
                 } else if let result = processor.processingResult {
                     ResultView(result: result) {
@@ -279,7 +279,7 @@ struct ContentView: View {
                 // Validate input type
                 let allSupportedTypes = supportedFormats(for: "input").values.flatMap { $0 }
                 guard allSupportedTypes.contains(where: { inputType.conforms(to: $0) }) else {
-                    throw ConversionError.unsupportedFormat
+                    throw ConversionError.unsupportedFormat(format: inputType)
                 }
                 
                 withAnimation {

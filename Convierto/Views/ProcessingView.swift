@@ -1,67 +1,89 @@
 import SwiftUI
 
 struct ProcessingView: View {
-    let progress: Double
+    @StateObject private var tracker = ProgressTracker()
     @State private var isAnimating = false
     
     var body: some View {
-        VStack(spacing: 32) {
-            // Animated progress circle
+        VStack(spacing: 24) {
             ZStack {
                 Circle()
-                    .stroke(Color.secondary.opacity(0.1), lineWidth: 8)
-                    .frame(width: 80, height: 80)
+                    .stroke(Color.secondary.opacity(0.2), lineWidth: 4)
+                    .frame(width: 64, height: 64)
                 
-                Circle()
-                    .trim(from: 0, to: progress)
-                    .stroke(
+                if tracker.isIndeterminate {
+                    Circle()
+                        .trim(from: 0, to: 0.7)
+                        .stroke(Color.accentColor, lineWidth: 4)
+                        .frame(width: 64, height: 64)
+                        .rotationEffect(.degrees(isAnimating ? 360 : 0))
+                } else {
+                    Circle()
+                        .trim(from: 0, to: tracker.progress)
+                        .stroke(Color.accentColor, lineWidth: 4)
+                        .frame(width: 64, height: 64)
+                }
+                
+                Image(systemName: getStageIcon())
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(
                         LinearGradient(
                             colors: [.accentColor, .accentColor.opacity(0.8)],
                             startPoint: .top,
                             endPoint: .bottom
-                        ),
-                        style: StrokeStyle(lineWidth: 8, lineCap: .round)
-                    )
-                    .frame(width: 80, height: 80)
-                    .rotationEffect(.degrees(-90))
-                    .animation(.spring(response: 0.6), value: progress)
-                
-                // Spinning inner circle
-                Circle()
-                    .fill(Color.accentColor.opacity(0.1))
-                    .frame(width: 64, height: 64)
-                    .overlay(
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 24, weight: .medium))
-                            .foregroundStyle(
-                                LinearGradient(
-                                    colors: [.accentColor, .accentColor.opacity(0.8)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                    )
-                    .rotationEffect(.degrees(isAnimating ? 360 : 0))
-                    .animation(
-                        .linear(duration: 2)
-                        .repeatForever(autoreverses: false),
-                        value: isAnimating
+                        )
                     )
             }
             
             VStack(spacing: 8) {
-                Text("Converting")
+                Text(getStageText())
                     .font(.system(size: 16, weight: .medium))
                 
-                Text("\(Int(progress * 100))%")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary)
-                    .animation(.spring(response: 0.3), value: progress)
+                if !tracker.isIndeterminate {
+                    Text("\(Int(tracker.progress * 100))%")
+                        .font(.system(size: 14))
+                        .foregroundColor(.secondary)
+                }
+                
+                if !tracker.statusMessage.isEmpty {
+                    Text(tracker.statusMessage)
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
-            isAnimating = true
+            withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
+                isAnimating = true
+            }
+        }
+    }
+    
+    private func getStageIcon() -> String {
+        switch tracker.currentStage {
+        case .preparing: return "gear"
+        case .loading: return "arrow.down.circle"
+        case .analyzing: return "magnifyingglass"
+        case .processing: return "arrow.triangle.2.circlepath"
+        case .optimizing: return "slider.horizontal.3"
+        case .exporting: return "square.and.arrow.up"
+        case .finishing: return "checkmark.circle"
+        case .completed: return "checkmark.circle.fill"
+        case .failed: return "xmark.circle"
+        }
+    }
+    
+    private func getStageText() -> String {
+        switch tracker.currentStage {
+        case .preparing: return "Preparing"
+        case .loading: return "Loading"
+        case .analyzing: return "Analyzing"
+        case .processing: return "Converting"
+        case .optimizing: return "Optimizing"
+        case .exporting: return "Exporting"
+        case .finishing: return "Finishing Up"
+        case .completed: return "Completed"
+        case .failed: return "Failed"
         }
     }
 } 

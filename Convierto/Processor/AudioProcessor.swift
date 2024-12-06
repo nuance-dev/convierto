@@ -9,43 +9,124 @@ private let logger = Logger(
     category: "AudioProcessor"
 )
 
-class AudioProcessor: BaseConverter, MediaConverting {
+class AudioProcessor: BaseConverter {
     private let visualizer: AudioVisualizer
     private let imageProcessor: ImageProcessor
+    private let resourcePool: ResourcePool
+    private let maxBufferSize: Int = 1024 * 1024 // 1MB buffer size
     
-    override init(settings: ConversionSettings = ConversionSettings()) {
+    required init(settings: ConversionSettings = ConversionSettings()) {
+        self.resourcePool = ResourcePool.shared
         self.visualizer = AudioVisualizer(size: CGSize(width: 1920, height: 1080))
         self.imageProcessor = ImageProcessor(settings: settings)
         super.init(settings: settings)
     }
     
-    func canConvert(from: UTType, to: UTType) -> Bool {
-        if from.conforms(to: .audio) {
-            return to.conforms(to: .audio) ||
-                   to.conforms(to: .audiovisualContent) ||
+    override func canConvert(from: UTType, to: UTType) -> Bool {
+        switch (from, to) {
+        case (let f, _) where f.conforms(to: .audio):
+            return to.conforms(to: .audio) || 
+                   to.conforms(to: .audiovisualContent) || 
                    to.conforms(to: .image)
+        case (let f, let t) where f.conforms(to: .audiovisualContent):
+            return true
+        default:
+            return false
         }
-        return false
     }
     
-    func convert(_ url: URL, to format: UTType, progress: Progress) async throws -> ProcessingResult {
-        let asset = AVAsset(url: url)
-        progress.totalUnitCount = 100
+    override func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+        let taskId = UUID()
+        await resourcePool.beginTask(id: taskId, type: .audio)
+        defer { Task { await resourcePool.endTask(id: taskId) } }
         
+        do {
+            let asset = AVAsset(url: url)
+            try await validateAudioAsset(asset)
+            
+            try await resourcePool.checkResourceAvailability(taskId: taskId, type: .audio)
+            
+            let strategy = try determineConversionStrategy(from: asset, to: format)
+            let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "m4a")
+            
+            return try await withTimeout(seconds: 300) {
+                try await self.executeConversion(
+                    asset: asset,
+                    to: outputURL,
+                    format: format,
+                    strategy: strategy,
+                    progress: progress,
+                    metadata: metadata
+                )
+            }
+        } catch let conversionError as ConversionError {
+            logger.error("Conversion failed: \(conversionError.localizedDescription)")
+            throw conversionError
+        } catch {
+            logger.error("Unexpected error: \(error.localizedDescription)")
+            throw ConversionError.conversionFailed(reason: error.localizedDescription)
+        }
+    }
+    
+    private func validateAudioAsset(_ asset: AVAsset) async throws {
         guard try await asset.loadTracks(withMediaType: .audio).first != nil else {
             throw ConversionError.invalidInput
         }
         
-        let outputURL = try CacheManager.shared.createTemporaryURL(
-            for: format.preferredFilenameExtension ?? "m4a"
-        )
-        
+        let duration = try await asset.load(.duration)
+        guard duration.seconds > 0 else {
+            throw ConversionError.invalidInput
+        }
+    }
+    
+    private func determineConversionStrategy(from asset: AVAsset, to format: UTType) throws -> ConversionStrategy {
         if format.conforms(to: .audiovisualContent) {
-            return try await createVisualizedVideo(from: asset, to: outputURL, format: format, progress: progress)
+            return .visualize
         } else if format.conforms(to: .image) {
-            return try await createWaveformImage(from: asset, to: outputURL, format: format, progress: progress)
-        } else {
-            return try await convertAudioFormat(from: asset, to: outputURL, format: format, progress: progress)
+            return .extractFrame
+        } else if format.conforms(to: .audio) {
+            return .direct
+        }
+        throw ConversionError.incompatibleFormats(from: .audio, to: format)
+    }
+    
+    private func executeConversion(
+        asset: AVAsset,
+        to outputURL: URL,
+        format: UTType,
+        strategy: ConversionStrategy,
+        progress: Progress,
+        metadata: ConversionMetadata
+    ) async throws -> ProcessingResult {
+        switch strategy {
+        case .direct:
+            return try await convertAudioFormat(
+                from: asset,
+                to: outputURL,
+                format: format,
+                metadata: metadata,
+                progress: progress
+            )
+        case .visualize:
+            if format.conforms(to: .audiovisualContent) {
+                return try await createVisualizedVideo(
+                    from: asset,
+                    to: outputURL,
+                    format: format,
+                    metadata: metadata,
+                    progress: progress
+                )
+            } else {
+                return try await createWaveformImage(
+                    from: asset,
+                    to: outputURL,
+                    format: format,
+                    metadata: metadata,
+                    progress: progress
+                )
+            }
+        default:
+            throw ConversionError.incompatibleFormats(from: .audio, to: format)
         }
     }
     
@@ -53,6 +134,7 @@ class AudioProcessor: BaseConverter, MediaConverting {
         from asset: AVAsset,
         to outputURL: URL,
         format: UTType,
+        metadata: ConversionMetadata,
         progress: Progress
     ) async throws -> ProcessingResult {
         logger.debug("Converting audio format")
@@ -65,7 +147,7 @@ class AudioProcessor: BaseConverter, MediaConverting {
                 withMediaType: .audio,
                 preferredTrackID: kCMPersistentTrackID_Invalid
               ) else {
-            throw ConversionError.conversionFailed
+            throw ConversionError.conversionFailed(reason: "Failed to create audio track")
         }
         
         let timeRange = CMTimeRange(start: .zero, duration: try await asset.load(.duration))
@@ -77,7 +159,7 @@ class AudioProcessor: BaseConverter, MediaConverting {
             outputFormat: format,
             isAudioOnly: true
         ) else {
-            throw ConversionError.exportFailed
+            throw ConversionError.exportFailed(reason: "Export session failed to complete")
         }
         
         exportSession.outputURL = outputURL
@@ -91,14 +173,15 @@ class AudioProcessor: BaseConverter, MediaConverting {
         await exportSession.export()
         
         guard exportSession.status == .completed else {
-            throw ConversionError.exportFailed
+            throw ConversionError.exportFailed(reason: "Export session failed to complete")
         }
         
         return ProcessingResult(
             outputURL: outputURL,
             originalFileName: "audio",
             suggestedFileName: "converted_audio." + (format.preferredFilenameExtension ?? "m4a"),
-            fileType: format
+            fileType: format,
+            metadata: metadata.toDictionary()
         )
     }
     
@@ -106,6 +189,7 @@ class AudioProcessor: BaseConverter, MediaConverting {
         from asset: AVAsset,
         to outputURL: URL,
         format: UTType,
+        metadata: ConversionMetadata,
         progress: Progress
     ) async throws -> ProcessingResult {
         logger.debug("Creating visualized video")
@@ -160,7 +244,7 @@ class AudioProcessor: BaseConverter, MediaConverting {
             asset: composition,
             presetName: settings.videoQuality
         ) else {
-            throw ConversionError.exportFailed
+            throw ConversionError.exportFailed(reason: "Export session failed to complete")
         }
         
         exportSession.outputURL = outputURL
@@ -181,14 +265,15 @@ class AudioProcessor: BaseConverter, MediaConverting {
         progressTask.cancel()
         
         guard exportSession.status == .completed else {
-            throw ConversionError.exportFailed
+            throw ConversionError.exportFailed(reason: "Export session failed to complete")
         }
         
         return ProcessingResult(
             outputURL: outputURL,
             originalFileName: "audio_visualization",
             suggestedFileName: "visualized_audio." + (format.preferredFilenameExtension ?? "mp4"),
-            fileType: format
+            fileType: format,
+            metadata: metadata.toDictionary()
         )
     }
     
@@ -196,6 +281,7 @@ class AudioProcessor: BaseConverter, MediaConverting {
         from asset: AVAsset,
         to outputURL: URL,
         format: UTType,
+        metadata: ConversionMetadata,
         progress: Progress
     ) async throws -> ProcessingResult {
         logger.debug("Creating waveform image")
@@ -206,20 +292,22 @@ class AudioProcessor: BaseConverter, MediaConverting {
         try await imageProcessor.saveImage(
             nsImage,
             format: format,
-            to: outputURL
+            to: outputURL,
+            metadata: metadata
         )
         
         return ProcessingResult(
             outputURL: outputURL,
             originalFileName: "waveform",
             suggestedFileName: "waveform." + (format.preferredFilenameExtension ?? "png"),
-            fileType: format
+            fileType: format,
+            metadata: metadata.toDictionary()
         )
     }
     
-    func validateConversion(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {
+    override func validateConversion(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {
         guard canConvert(from: inputType, to: outputType) else {
-            throw ConversionError.incompatibleFormats
+            throw ConversionError.incompatibleFormats(from: inputType, to: outputType)
         }
         
         if inputType.conforms(to: .audio) {
@@ -232,6 +320,6 @@ class AudioProcessor: BaseConverter, MediaConverting {
             }
         }
         
-        throw ConversionError.incompatibleFormats
+        throw ConversionError.incompatibleFormats(from: inputType, to: outputType)
     }
 }
