@@ -269,21 +269,28 @@ class AudioVisualizer {
         return frame
     }
     
-    private func createPixelBuffer(from image: CGImage) async throws -> CVPixelBuffer? {
+    internal func createPixelBuffer(from image: CGImage) throws -> CVPixelBuffer? {
         var pixelBuffer: CVPixelBuffer?
         let width = image.width
         let height = image.height
         
-        CVPixelBufferCreate(
+        let attrs = [
+            kCVPixelBufferCGImageCompatibilityKey: kCFBooleanTrue,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: kCFBooleanTrue
+        ] as CFDictionary
+        
+        let status = CVPixelBufferCreate(
             kCFAllocatorDefault,
             width,
             height,
             kCVPixelFormatType_32ARGB,
-            nil,
+            attrs,
             &pixelBuffer
         )
         
-        guard let buffer = pixelBuffer else { return nil }
+        guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
+            return nil
+        }
         
         CVPixelBufferLockBaseAddress(buffer, [])
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
@@ -300,7 +307,40 @@ class AudioVisualizer {
             return nil
         }
         
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        // Draw CGImage directly into context
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        context.draw(image, in: rect)
+        
         return buffer
+    }
+    
+    func generateVisualizationFrames(
+        from samples: [Float],
+        duration: Double,
+        frameCount: Int
+    ) async throws -> [CGImage] {
+        logger.debug("Generating visualization frames")
+        var frames: [CGImage] = []
+        let samplesPerFrame = samples.count / frameCount
+        
+        for frameIndex in 0..<frameCount {
+            let startIndex = frameIndex * samplesPerFrame
+            let endIndex = min(startIndex + samplesPerFrame, samples.count)
+            let frameSamples = Array(samples[startIndex..<endIndex])
+            
+            if let frame = try await generateVisualizationFrame(from: frameSamples) {
+                frames.append(frame)
+            }
+            
+            if frameIndex % 10 == 0 {
+                logger.debug("Generated frame \(frameIndex)/\(frameCount)")
+            }
+        }
+        
+        if frames.isEmpty {
+            throw ConversionError.conversionFailed(reason: "No frames generated")
+        }
+        
+        return frames
     }
 }

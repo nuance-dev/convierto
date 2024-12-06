@@ -89,10 +89,19 @@ struct DropZoneView: View {
                     showError: showError,
                     errorMessage: errorMessage,
                     onTryAgain: {
-                        // Handle "Try Again" button action
+                        withAnimation {
+                            showError = false
+                            errorMessage = nil
+                            isDragging = false
+                        }
                     },
                     onStartOver: {
-                        // Handle "Start Over" button action
+                        withAnimation {
+                            showError = false
+                            errorMessage = nil
+                            isDragging = false
+                            onFilesSelected([])  // Clear any selected files
+                        }
                     }
                 )
             }

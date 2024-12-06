@@ -212,89 +212,173 @@ class AudioProcessor: BaseConverter {
         metadata: ConversionMetadata,
         progress: Progress
     ) async throws -> ProcessingResult {
-        logger.debug("Creating visualized video")
+        logger.debug("🎨 Creating audio visualization")
         
         let duration = try await asset.load(.duration)
-        let frameCount = Int(duration.seconds * Double(settings.frameRate))
+        let samples = try await extractAudioSamples(
+            from: asset,
+            at: .zero,
+            windowSize: duration.seconds
+        )
         
-        // Create video composition
-        let composition = AVMutableComposition()
-        
-        // Add audio track with proper settings
-        if let audioTrack = try await asset.loadTracks(withMediaType: .audio).first,
-           let compositionAudioTrack = composition.addMutableTrack(
-            withMediaType: .audio,
-            preferredTrackID: kCMPersistentTrackID_Invalid
-           ) {
-            try compositionAudioTrack.insertTimeRange(
-                CMTimeRange(start: .zero, duration: duration),
-                of: audioTrack,
-                at: .zero
-            )
-        }
-        
-        // Generate visualization frames
-        progress.totalUnitCount = Int64(frameCount)
+        let frameCount = Int(duration.seconds * 30) // 30 fps
         let frames = try await visualizer.generateVisualizationFrames(
-            for: asset,
+            from: samples,
+            duration: duration.seconds,
             frameCount: frameCount
         )
         
-        // Create video track from frames
-        let videoTrack = try await visualizer.createVideoTrack(
-            from: frames,
-            duration: duration,
-            settings: settings
+        // Create video writer
+        let videoWriter = try AVAssetWriter(url: outputURL, fileType: .mp4)
+        logger.debug("✅ Created video writer")
+        
+        // Configure video settings
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: 1920,
+            AVVideoHeightKey: 1080,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: 10_000_000,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+            ]
+        ]
+        
+        // Create video input
+        let videoInput = AVAssetWriterInput(
+            mediaType: .video,
+            outputSettings: videoSettings
         )
+        videoInput.expectsMediaDataInRealTime = false
         
-        // Add video track to composition
-        if let compositionVideoTrack = composition.addMutableTrack(
-            withMediaType: .video,
-            preferredTrackID: kCMPersistentTrackID_Invalid
-        ) {
-            try compositionVideoTrack.insertTimeRange(
-                CMTimeRange(start: .zero, duration: duration),
-                of: videoTrack,
-                at: .zero
-            )
+        // Create audio input from original asset
+        let audioSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 44100,
+            AVNumberOfChannelsKey: 2,
+            AVEncoderBitRateKey: 128000
+        ]
+        
+        let audioInput = AVAssetWriterInput(
+            mediaType: .audio,
+            outputSettings: audioSettings
+        )
+        audioInput.expectsMediaDataInRealTime = false
+        
+        // Add inputs to writer
+        videoWriter.add(videoInput)
+        videoWriter.add(audioInput)
+        
+        // Start writing session
+        if !videoWriter.startWriting() {
+            throw ConversionError.conversionFailed(reason: "Failed to start writing")
         }
         
-        // Export with proper settings
-        guard let exportSession = AVAssetExportSession(
-            asset: composition,
-            presetName: settings.videoQuality
-        ) else {
-            throw ConversionError.exportFailed(reason: "Export session failed to complete")
-        }
+        videoWriter.startSession(atSourceTime: .zero)
         
-        exportSession.outputURL = outputURL
-        exportSession.outputFileType = format == .quickTimeMovie ? .mov : .mp4
-        
-        // Monitor export progress using async/await
-        let progressTask = Task {
-            while !Task.isCancelled {
-                progress.completedUnitCount = Int64(exportSession.progress * 100)
-                if exportSession.status == .completed || exportSession.status == .failed {
-                    break
+        // Write video frames
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let queue = DispatchQueue(label: "com.convierto.videowriting")
+            videoInput.requestMediaDataWhenReady(on: queue) {
+                var frameIndex = 0
+                while videoInput.isReadyForMoreMediaData && frameIndex < frames.count {
+                    autoreleasepool {
+                        let frame = frames[frameIndex]
+                        if let pixelBuffer = try? self.visualizer.createPixelBuffer(from: frame) {
+                            let presentationTime = CMTime(value: Int64(frameIndex), timescale: 30)
+                            
+                            var timingInfo = CMSampleTimingInfo(
+                                duration: CMTime(value: 1, timescale: 30),
+                                presentationTimeStamp: presentationTime,
+                                decodeTimeStamp: .invalid
+                            )
+                            
+                            var videoInfo: CMVideoFormatDescription?
+                            CMVideoFormatDescriptionCreateForImageBuffer(
+                                allocator: kCFAllocatorDefault,
+                                imageBuffer: pixelBuffer,
+                                formatDescriptionOut: &videoInfo
+                            )
+                            
+                            if let videoInfo = videoInfo {
+                                var sampleBuffer: CMSampleBuffer?
+                                CMSampleBufferCreateForImageBuffer(
+                                    allocator: kCFAllocatorDefault,
+                                    imageBuffer: pixelBuffer,
+                                    dataReady: true,
+                                    makeDataReadyCallback: nil,
+                                    refcon: nil,
+                                    formatDescription: videoInfo,
+                                    sampleTiming: &timingInfo,
+                                    sampleBufferOut: &sampleBuffer
+                                )
+                                
+                                if let sampleBuffer = sampleBuffer,
+                                   !videoInput.append(sampleBuffer) {
+                                    continuation.resume(throwing: ConversionError.conversionFailed(reason: "Failed to append video frame"))
+                                    return
+                                }
+                            }
+                        }
+                        frameIndex += 1
+                        progress.completedUnitCount = Int64((Double(frameIndex) / Double(frames.count)) * 100)
+                    }
                 }
-                try await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
+                
+                videoInput.markAsFinished()
+                continuation.resume()
             }
         }
         
-        await exportSession.export()
-        progressTask.cancel()
+        // Copy audio from original asset
+        try await copyAudioTrack(from: asset, to: audioInput)
+        audioInput.markAsFinished()
         
-        guard exportSession.status == .completed else {
-            throw ConversionError.exportFailed(reason: "Export session failed to complete")
+        // Finish writing
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            videoWriter.finishWriting {
+                if let error = videoWriter.error {
+                    continuation.resume(throwing: ConversionError.conversionFailed(reason: error.localizedDescription))
+                } else {
+                    continuation.resume()
+                }
+            }
         }
         
         return ProcessingResult(
             outputURL: outputURL,
-            originalFileName: "audio_visualization",
+            originalFileName: metadata.originalFileName ?? "audio_visualization",
             suggestedFileName: "visualized_audio." + (format.preferredFilenameExtension ?? "mp4"),
             fileType: format,
             metadata: metadata.toDictionary()
         )
+    }
+    
+    private func copyAudioTrack(from asset: AVAsset, to audioInput: AVAssetWriterInput) async throws {
+        guard let audioTrack = try await asset.loadTracks(withMediaType: .audio).first else {
+            throw ConversionError.conversionFailed(reason: "No audio track found")
+        }
+        
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(
+            track: audioTrack,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsFloatKey: false
+            ]
+        )
+        
+        reader.add(output)
+        if !reader.startReading() {
+            throw ConversionError.conversionFailed(reason: "Failed to start reading audio")
+        }
+        
+        while let buffer = output.copyNextSampleBuffer() {
+            if !audioInput.append(buffer) {
+                throw ConversionError.conversionFailed(reason: "Failed to append audio buffer")
+            }
+        }
     }
     
     func createWaveformImage(
@@ -331,7 +415,11 @@ class AudioProcessor: BaseConverter {
         }
     }
     
-    private func extractAudioSamples(from asset: AVAsset) async throws -> [Float] {
+    func extractAudioSamples(
+        from asset: AVAsset,
+        at time: CMTime,
+        windowSize: Double
+    ) async throws -> [Float] {
         guard let audioTrack = try await asset.loadTracks(withMediaType: .audio).first else {
             throw ConversionError.conversionFailed(reason: "No audio track found")
         }
@@ -471,6 +559,91 @@ class AudioProcessor: BaseConverter {
             suggestedFileName: "converted_audio." + (format.preferredFilenameExtension ?? "m4a"),
             fileType: format,
             metadata: metadata.toDictionary()
+        )
+    }
+    
+    func createPixelBuffer(from image: NSImage) throws -> CVPixelBuffer? {
+        var pixelBuffer: CVPixelBuffer?
+        let width = Int(image.size.width)
+        let height = Int(image.size.height)
+        
+        let attrs = [
+            kCVPixelBufferCGImageCompatibilityKey: kCFBooleanTrue,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: kCFBooleanTrue
+        ] as CFDictionary
+        
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_32ARGB,
+            attrs,
+            &pixelBuffer
+        )
+        
+        guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
+            logger.error("❌ Failed to create pixel buffer")
+            return nil
+        }
+        
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        
+        guard let context = CGContext(
+            data: CVPixelBufferGetBaseAddress(buffer),
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+        ) else {
+            logger.error("❌ Failed to create CGContext")
+            return nil
+        }
+        
+        NSGraphicsContext.saveGraphicsState()
+        let nsContext = NSGraphicsContext(cgContext: context, flipped: false)
+        NSGraphicsContext.current = nsContext
+        image.draw(in: CGRect(x: 0, y: 0, width: width, height: height))
+        NSGraphicsContext.restoreGraphicsState()
+        
+        return buffer
+    }
+    
+    func createVideoFromImage(_ image: NSImage, format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
+        
+        let videoWriter = try AVAssetWriter(url: outputURL, fileType: .mp4)
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(image.size.width),
+            AVVideoHeightKey: Int(image.size.height)
+        ]
+        
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput,
+            sourcePixelBufferAttributes: nil
+        )
+        
+        videoWriter.add(videoInput)
+        videoWriter.startWriting()
+        videoWriter.startSession(atSourceTime: .zero)
+        
+        if let buffer = try createPixelBuffer(from: image) {
+            adaptor.append(buffer, withPresentationTime: .zero)
+        }
+        
+        videoInput.markAsFinished()
+        await videoWriter.finishWriting()
+        
+        return ProcessingResult(
+            outputURL: outputURL,
+            originalFileName: metadata.originalFileName ?? "image",
+            suggestedFileName: "converted_video." + (format.preferredFilenameExtension ?? "mp4"),
+            fileType: format,
+            metadata: nil
         )
     }
 }
