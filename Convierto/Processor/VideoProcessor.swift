@@ -26,12 +26,20 @@ class VideoProcessor: BaseConverter {
     }
     
     override func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+        logger.debug("🎬 Starting video conversion")
+        let urlPath = url.path(percentEncoded: false)
+        logger.debug("📂 Input URL: \(urlPath)")
+        logger.debug("🎯 Target format: \(format.identifier)")
+        
         let asset = AVURLAsset(url: url)
+        logger.debug("✅ Created AVURLAsset")
         
         do {
+            logger.debug("⚙️ Attempting primary conversion")
             return try await performConversion(asset: asset, originalURL: url, to: format, metadata: metadata, progress: progress)
         } catch {
-            logger.error("Primary conversion failed: \(error.localizedDescription)")
+            logger.error("❌ Primary conversion failed: \(error.localizedDescription)")
+            logger.debug("🔄 Attempting fallback conversion")
             return try await handleFallback(asset: asset, originalURL: url, to: format, metadata: metadata, progress: progress)
         }
     }
@@ -84,46 +92,69 @@ class VideoProcessor: BaseConverter {
         progress: Progress,
         settings: ConversionSettings = ConversionSettings()
     ) async throws -> ProcessingResult {
-        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
+        logger.debug("⚙️ Starting conversion process")
         
-        // Create export session with proper settings
+        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
+        let outputPath = outputURL.path(percentEncoded: false)
+        logger.debug("📂 Created temporary output URL: \(outputPath)")
+        
         guard let exportSession = try await createExportSession(for: asset, outputFormat: format) else {
+            logger.error("❌ Failed to create export session")
             throw ConversionError.conversionFailed(reason: "Failed to create export session")
         }
+        logger.debug("✅ Created export session")
         
         exportSession.outputURL = outputURL
         exportSession.outputFileType = getAVFileType(for: format)
+        logger.debug("⚙️ Configured export session with type: \(String(describing: exportSession.outputFileType?.rawValue))")
         
-        // Apply audio mix if available
         if let audioMix = try await createAudioMix(for: asset) {
             exportSession.audioMix = audioMix
+            logger.debug("🎵 Applied audio mix")
         }
         
-        // Configure video settings
         if format.conforms(to: .audiovisualContent) {
-            exportSession.videoComposition = try await createVideoComposition(for: asset)
+            let videoComposition = try await createVideoComposition(for: asset)
+            exportSession.videoComposition = videoComposition
+            logger.debug("🎥 Applied video composition")
         }
         
-        // Track progress
+        logger.debug("▶️ Starting export")
         let progressTask = Task {
             while !Task.isCancelled {
                 let currentProgress = exportSession.progress
                 progress.completedUnitCount = Int64(currentProgress * 100)
-                try await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
+                logger.debug("📊 Export progress: \(Int(currentProgress * 100))%")
+                try? await Task.sleep(nanoseconds: 100_000_000)
                 if exportSession.status == .completed || exportSession.status == .failed {
                     break
                 }
             }
         }
         
-        // Perform export
-        await exportSession.export()
+        try await withCheckedThrowingContinuation { continuation in
+            exportSession.exportAsynchronously {
+                if exportSession.status == .completed {
+                    continuation.resume()
+                } else if let error = exportSession.error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(throwing: ConversionError.conversionFailed(reason: "Export failed"))
+                }
+            }
+        }
+        
         progressTask.cancel()
+        logger.debug("⏹️ Export completed with status: \(exportSession.status.rawValue)")
         
         guard exportSession.status == .completed else {
+            if let error = exportSession.error {
+                logger.error("❌ Export failed: \(error.localizedDescription)")
+            }
             throw exportSession.error ?? ConversionError.conversionFailed(reason: "Export failed")
         }
         
+        logger.debug("✅ Conversion successful")
         return ProcessingResult(
             outputURL: outputURL,
             originalFileName: metadata.originalFileName ?? originalURL.lastPathComponent,

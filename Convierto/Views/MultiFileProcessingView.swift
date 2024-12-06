@@ -1,6 +1,12 @@
 import Foundation
 import UniformTypeIdentifiers
 import SwiftUI
+import os.log
+
+private let logger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "Convierto",
+    category: "MultiFileProcessingView"
+)
 
 struct FileProcessingState: Identifiable {
     let id: UUID
@@ -128,35 +134,56 @@ class MultiFileProcessor: ObservableObject {
     }
     
     func saveConvertedFile(url: URL, originalName: String) async {
+        logger.debug("💾 Starting save process")
+        logger.debug("📂 Source URL: \(url.path)")
+        logger.debug("📝 Original name: \(originalName)")
+        logger.debug("🎯 Selected format: \(self.selectedOutputFormat.identifier)")
+        
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
         panel.showsTagField = false
         
         // Get the correct extension for the current format
         let newExtension = selectedOutputFormat.preferredFilenameExtension ?? "converted"
-        let filenameWithoutExt = URL(fileURLWithPath: originalName).deletingPathExtension().lastPathComponent
+        logger.debug("📎 Target extension: \(newExtension)")
+        
+        // Clean up the original filename
+        let filenameWithoutExt = (originalName as NSString).deletingPathExtension
         let suggestedFilename = "\(filenameWithoutExt)_converted.\(newExtension)"
+        logger.debug("📄 Suggested filename: \(suggestedFilename)")
         
         panel.nameFieldStringValue = suggestedFilename
         panel.message = "Choose where to save the converted file"
         panel.allowedContentTypes = [selectedOutputFormat]
         
-        guard let window = NSApp.windows.first else { return }
+        guard let window = NSApp.windows.first else {
+            logger.error("❌ No window found for save panel")
+            return
+        }
         
         let response = await panel.beginSheetModal(for: window)
         
         if response == .OK, let saveURL = panel.url {
+            logger.debug("✅ Save location selected: \(saveURL.path)")
+            
             do {
-                if FileManager.default.fileExists(atPath: saveURL.path) {
-                    try FileManager.default.removeItem(at: saveURL)
+                // Always ensure we're using the correct extension
+                let finalURL = saveURL.deletingPathExtension().appendingPathExtension(newExtension)
+                logger.debug("📍 Final save URL: \(finalURL.path)")
+                
+                if FileManager.default.fileExists(atPath: finalURL.path) {
+                    logger.debug("⚠️ Existing file found, removing")
+                    try FileManager.default.removeItem(at: finalURL)
                 }
                 
-                // Ensure correct extension on the output file
-                let finalURL = saveURL.deletingPathExtension().appendingPathExtension(newExtension)
+                logger.debug("📦 Copying file to destination")
                 try FileManager.default.copyItem(at: url, to: finalURL)
+                logger.debug("✅ File saved successfully")
             } catch {
-                print("Failed to save file: \(error.localizedDescription)")
+                logger.error("❌ Failed to save file: \(error.localizedDescription)")
             }
+        } else {
+            logger.debug("❌ Save cancelled by user")
         }
     }
     

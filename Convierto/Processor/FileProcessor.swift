@@ -73,24 +73,37 @@ class FileProcessor: ObservableObject {
     }
     
     func processFile(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
+        logger.debug("🔄 Starting file processing")
+        logger.debug("📂 Input URL: \(url.path)")
+        logger.debug("🎯 Output format: \(outputFormat.identifier)")
+        
         let progress = Progress(totalUnitCount: 100)
+        logger.debug("⏳ Progress tracker initialized")
         
         // Validate file first
         let validator = FileValidator()
+        logger.debug("🔍 Starting file validation")
         try await validator.validateFile(url)
+        logger.debug("✅ File validation passed")
         
         // Create metadata
+        logger.debug("📋 Creating metadata")
         let metadata = try await createMetadata(for: url)
+        logger.debug("✅ Metadata created: \(String(describing: metadata))")
         
         // Ensure we have necessary permissions
+        logger.debug("🔐 Checking file permissions")
         guard url.startAccessingSecurityScopedResource() else {
+            logger.error("❌ Security-scoped resource access denied")
             throw ConversionError.fileAccessDenied(path: url.path)
         }
         
         defer {
+            logger.debug("🔓 Releasing security-scoped resource")
             url.stopAccessingSecurityScopedResource()
         }
         
+        logger.debug("⚙️ Initiating conversion process")
         return try await coordinator.convert(
             url: url,
             to: outputFormat,

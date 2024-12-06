@@ -32,32 +32,48 @@ class DocumentProcessor: BaseConverter {
     }
     
     override func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+        logger.debug("📄 Starting document conversion process")
+        logger.debug("📂 Input file: \(url.path)")
+        logger.debug("🎯 Target format: \(format.identifier)")
+        
         let taskId = UUID()
+        logger.debug("🔑 Task ID: \(taskId.uuidString)")
+        
         await resourcePool.beginTask(id: taskId, type: .document)
         defer { Task { await resourcePool.endTask(id: taskId) } }
         
         do {
             let inputType = try await determineInputType(url)
+            logger.debug("📋 Input type determined: \(inputType.identifier)")
+            
             let strategy = try validateConversion(from: inputType, to: format)
+            logger.debug("⚙️ Conversion strategy: \(String(describing: strategy))")
+            
             try await resourcePool.checkResourceAvailability(taskId: taskId, type: .document)
+            logger.debug("✅ Resource availability confirmed")
             
             return try await withTimeout(seconds: 180) {
+                self.logger.debug("⏳ Starting conversion with 180s timeout")
                 switch strategy {
                 case .extractFrame:
+                    self.logger.debug("🖼️ Converting PDF to image")
                     return try await self.convertPDFToImage(url, outputFormat: format, metadata: metadata, progress: progress)
                 case .createVideo:
+                    self.logger.debug("🎬 Converting PDF to video")
                     return try await self.convertPDFToVideo(url, outputFormat: format, metadata: metadata, progress: progress)
                 case .combine:
+                    self.logger.debug("📑 Converting image to PDF")
                     return try await self.convertImageToPDF(url, metadata: metadata, progress: progress)
                 default:
+                    self.logger.error("❌ Unsupported conversion strategy")
                     throw ConversionError.incompatibleFormats(from: inputType, to: format)
                 }
             }
         } catch let error as ConversionError {
-            logger.error("Document conversion failed: \(error.localizedDescription)")
+            logger.error("❌ Document conversion failed: \(error.localizedDescription)")
             throw error
         } catch {
-            logger.error("Unexpected error: \(error.localizedDescription)")
+            logger.error("❌ Unexpected error: \(error.localizedDescription)")
             throw ConversionError.conversionFailed(reason: error.localizedDescription)
         }
     }

@@ -36,21 +36,35 @@ class AudioProcessor: BaseConverter {
     }
     
     override func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+        logger.debug("🎵 Starting audio conversion process")
+        logger.debug("📂 Input file: \(url.path)")
+        logger.debug("🎯 Target format: \(format.identifier)")
+        
         let taskId = UUID()
+        logger.debug("🔑 Task ID: \(taskId.uuidString)")
+        
         await resourcePool.beginTask(id: taskId, type: .audio)
         defer { Task { await resourcePool.endTask(id: taskId) } }
         
         do {
             let asset = AVAsset(url: url)
+            logger.debug("📼 Asset created successfully")
+            
             try await validateAudioAsset(asset)
+            logger.debug("✅ Asset validation passed")
             
             try await resourcePool.checkResourceAvailability(taskId: taskId, type: .audio)
+            logger.debug("✅ Resource availability confirmed")
             
             let strategy = try determineConversionStrategy(from: asset, to: format)
+            logger.debug("⚙️ Conversion strategy determined: \(String(describing: strategy))")
+            
             let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "m4a")
+            logger.debug("📝 Output URL created: \(outputURL.path)")
             
             return try await withTimeout(seconds: 300) {
-                try await self.executeConversion(
+                logger.debug("⏳ Starting conversion with 300s timeout")
+                let result = try await self.executeConversion(
                     asset: asset,
                     to: outputURL,
                     format: format,
@@ -58,12 +72,14 @@ class AudioProcessor: BaseConverter {
                     progress: progress,
                     metadata: metadata
                 )
+                logger.debug("✅ Conversion completed successfully")
+                return result
             }
         } catch let conversionError as ConversionError {
-            logger.error("Conversion failed: \(conversionError.localizedDescription)")
+            logger.error("❌ Conversion failed: \(conversionError.localizedDescription)")
             throw conversionError
         } catch {
-            logger.error("Unexpected error: \(error.localizedDescription)")
+            logger.error("❌ Unexpected error: \(error.localizedDescription)")
             throw ConversionError.conversionFailed(reason: error.localizedDescription)
         }
     }
