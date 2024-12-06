@@ -2,6 +2,8 @@ import Foundation
 import AVFoundation
 import UniformTypeIdentifiers
 import os
+import CoreImage
+import AppKit
 
 protocol MediaConverting {
     func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult
@@ -97,46 +99,35 @@ class BaseConverter: MediaConverting {
     }
     
     func validateConversion(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {
-        // Check basic compatibility
+        logger.debug("🔍 Validating conversion from \(inputType.identifier) to \(outputType.identifier)")
+        
+        // Ensure types are actually different
+        if inputType == outputType {
+            logger.debug("⚠️ Same input and output format detected")
+            return .direct
+        }
+        
+        // Validate basic compatibility
         guard canConvert(from: inputType, to: outputType) else {
+            logger.error("❌ Incompatible formats detected")
             throw ConversionError.incompatibleFormats(from: inputType, to: outputType)
         }
         
-        // Determine conversion strategy
-        let strategy: ConversionStrategy
-        
-        switch (inputType, outputType) {
-        case (let i, let o) where i.conforms(to: .image) && o.conforms(to: .audiovisualContent):
-            strategy = .createVideo
-            
-        case (let i, let o) where i.conforms(to: .audio) && o.conforms(to: .image):
-            strategy = .visualize
-            
-        case (let i, let o) where i.conforms(to: .audiovisualContent) && o.conforms(to: .image):
-            strategy = .extractFrame
-            
-        case (let i, let o) where i.conforms(to: .audio) && o.conforms(to: .audiovisualContent):
-            strategy = .visualize
-            
-        case (let i, let o) where i.conforms(to: .image) && o == .pdf:
-            strategy = .combine
-            
-        case (.pdf, let o) where o.conforms(to: .image):
-            strategy = .extractFrame
-            
-        default:
-            strategy = .direct
-        }
-        
-        return strategy
+        logger.debug("✅ Format validation successful")
+        return .direct
     }
     
     func validateConversionCapabilities(from inputType: UTType, to outputType: UTType) throws {
+        logger.debug("Validating conversion capabilities from \(inputType.identifier) to \(outputType.identifier)")
+        
         // Check system resources
         let availableMemory = ProcessInfo.processInfo.physicalMemory
         let requiredMemory = estimateMemoryRequirement(for: inputType, to: outputType)
         
+        logger.debug("Memory check - Required: \(String(describing: requiredMemory)), Available: \(String(describing: availableMemory))")
+        
         if requiredMemory > availableMemory / 2 {
+            logger.error("Insufficient memory for conversion")
             throw ConversionError.insufficientMemory(
                 required: requiredMemory,
                 available: availableMemory
@@ -144,33 +135,38 @@ class BaseConverter: MediaConverting {
         }
         
         // Validate format compatibility
-        guard let strategy = try? validateConversion(from: inputType, to: outputType) else {
-            throw ConversionError.incompatibleFormats(from: inputType, to: outputType)
+        let strategy: ConversionStrategy
+        do {
+            strategy = try validateConversion(from: inputType, to: outputType)
+        } catch {
+            logger.error("Format compatibility validation failed: \(error.localizedDescription)")
+            throw error
         }
+        
+        logger.debug("Conversion strategy determined: \(String(describing: strategy))")
         
         // Check if conversion is actually possible
         if !canActuallyConvert(from: inputType, to: outputType, strategy: strategy) {
+            logger.error("Conversion not possible with current configuration")
             throw ConversionError.conversionNotPossible(
-                reason: "No suitable conversion path available from \(inputType.localizedDescription ?? "unknown") to \(outputType.localizedDescription ?? "unknown")"
+                reason: "Cannot convert from \(inputType.identifier) to \(outputType.identifier) using strategy \(String(describing: strategy))"
             )
         }
+        
+        logger.debug("Conversion capabilities validation successful")
     }
     
-    private func canActuallyConvert(from inputType: UTType, to outputType: UTType, strategy: ConversionStrategy) -> Bool {
-        switch (inputType, outputType) {
-        case (let i, let o) where i.conforms(to: .image) && o.conforms(to: .audiovisualContent):
-            return true // Image to video is always possible
-        case (let i, let o) where i.conforms(to: .audio) && o.conforms(to: .image):
-            return true // Audio visualization is always possible
-        case (let i, let o) where i.conforms(to: .audiovisualContent) && o.conforms(to: .image):
-            return true // Frame extraction is always possible
-        case (let i, let o) where i.conforms(to: .image) && o == .pdf:
-            return true // Image to PDF is always possible
-        case (.pdf, let o) where o.conforms(to: .image):
-            return true // PDF to image is always possible
-        default:
-            return strategy == .direct // For other cases, only direct conversion is reliable
-        }
+    func canActuallyConvert(from inputType: UTType, to outputType: UTType, strategy: ConversionStrategy) -> Bool {
+        logger.debug("Checking actual conversion possibility for strategy: \(String(describing: strategy))")
+        
+        // Verify system capabilities
+        let hasRequiredFrameworks: Bool = verifyFrameworkAvailability(for: strategy)
+        let hasRequiredPermissions: Bool = verifyPermissions(for: strategy)
+        
+        logger.debug("Frameworks available: \(String(describing: hasRequiredFrameworks))")
+        logger.debug("Permissions verified: \(String(describing: hasRequiredPermissions))")
+        
+        return hasRequiredFrameworks && hasRequiredPermissions
     }
     
     private func estimateMemoryRequirement(for inputType: UTType, to outputType: UTType) -> UInt64 {
@@ -187,5 +183,54 @@ class BaseConverter: MediaConverting {
         }
         
         return requirement
+    }
+    
+    private func verifyFrameworkAvailability(for strategy: ConversionStrategy) -> Bool {
+        switch strategy {
+        case .createVideo:
+            if #available(macOS 13.0, *) {
+                let session = AVAssetExportSession(asset: AVAsset(), presetName: AVAssetExportPresetHighestQuality)
+                return session?.supportedFileTypes.contains(.mp4) ?? false
+            } else {
+                return AVAssetExportSession.allExportPresets().contains(AVAssetExportPresetHighestQuality)
+            }
+            
+        case .extractFrame:
+            return NSImage.self != nil
+            
+        case .visualize:
+            #if canImport(CoreImage)
+            return CIContext(options: [CIContextOption.useSoftwareRenderer: false]) != nil
+            #else
+            return false
+            #endif
+            
+        case .extractAudio:
+            if #available(macOS 13.0, *) {
+                let session = AVAssetExportSession(asset: AVAsset(), presetName: AVAssetExportPresetAppleM4A)
+                return session?.supportedFileTypes.contains(.m4a) ?? false
+            } else {
+                return AVAssetExportSession.allExportPresets().contains(AVAssetExportPresetAppleM4A)
+            }
+            
+        case .combine:
+            return NSGraphicsContext.self != nil
+            
+        case .direct:
+            return true
+        }
+    }
+    
+    private func verifyPermissions(for strategy: ConversionStrategy) -> Bool {
+        switch strategy {
+        case .createVideo, .extractFrame, .visualize:
+            return true // No special permissions needed for media processing
+        case .extractAudio:
+            return true // Audio processing doesn't require special permissions
+        case .combine:
+            return true // Document processing doesn't require special permissions
+        case .direct:
+            return true // Basic conversion doesn't require special permissions
+        }
     }
 }

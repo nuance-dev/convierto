@@ -94,6 +94,7 @@ class ConversionCoordinator: NSObject {
             do {
                 if attempt > 0 {
                     let delay = UInt64(pow(2.0, Double(attempt))) * 1_000_000_000
+                    logger.debug("Retry attempt \(attempt + 1) after \(delay/1_000_000_000) seconds")
                     try await Task.sleep(nanoseconds: delay)
                 }
                 return try await operation()
@@ -104,27 +105,34 @@ class ConversionCoordinator: NSObject {
             }
         }
         
+        logger.error("All retry attempts failed")
         throw lastError ?? ConversionError.conversionFailed(reason: "Max retries exceeded")
     }
     
     private func performConversion(
-    url: URL,
-    to outputFormat: UTType,
-    metadata: ConversionMetadata,
-    progress: Progress
-) async throws -> ProcessingResult {
-    let resourceValues = try url.resourceValues(forKeys: [.contentTypeKey])
-    guard let inputType = resourceValues.contentType else {
-        throw ConversionError.invalidInputType
+        url: URL,
+        to outputFormat: UTType,
+        metadata: ConversionMetadata,
+        progress: Progress
+    ) async throws -> ProcessingResult {
+        logger.debug("🎬 Starting conversion process")
+        logger.debug("📂 Source: \(url.path)")
+        logger.debug("🎯 Target format: \(outputFormat.identifier)")
+        
+        logger.debug("🔍 Determining input type")
+        let resourceValues = try url.resourceValues(forKeys: [.contentTypeKey])
+        guard let inputType = resourceValues.contentType else {
+            logger.error("❌ Failed to determine input type")
+            throw ConversionError.invalidInputType
+        }
+        
+        logger.debug("✅ Input type determined: \(inputType.identifier)")
+        
+        if inputType.conforms(to: .image) && outputFormat.conforms(to: .image) {
+            let imageProcessor = ImageProcessor()
+            return try await imageProcessor.processImage(url, to: outputFormat, metadata: metadata, progress: progress)
+        }
+        
+        throw ConversionError.conversionNotPossible(reason: "Unsupported conversion type")
     }
-    
-    let processor = await FileProcessor()
-    let strategy = try await processor.determineStrategy(from: inputType, to: outputFormat)
-    
-    // Check system resources before proceeding
-    let taskId = UUID()
-    try await ResourcePool.shared.checkResourceAvailability(taskId: taskId, type: .conversion(strategy))
-    
-    return try await processor.processFile(url, outputFormat: outputFormat, metadata: metadata)
-}
 } 

@@ -75,18 +75,21 @@ class FileProcessor: ObservableObject {
     func processFile(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
         let progress = Progress(totalUnitCount: 100)
         
-        // Create metadata asynchronously
-        let metadata = ConversionMetadata(
-            originalFileName: url.lastPathComponent,
-            originalFileType: try await determineInputType(url),
-            creationDate: try await url.resourceValues(forKeys: [.creationDateKey]).creationDate,
-            modificationDate: try await url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
-            fileSize: Int64(try await url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-        )
+        // Validate file first
+        let validator = FileValidator()
+        try await validator.validateFile(url)
         
-        // Check system resources
-        let requiredMemory: UInt64 = 100_000_000 // 100MB minimum
-        try await ResourcePool.shared.checkMemoryAvailability(required: requiredMemory)
+        // Create metadata
+        let metadata = try await createMetadata(for: url)
+        
+        // Ensure we have necessary permissions
+        guard url.startAccessingSecurityScopedResource() else {
+            throw ConversionError.fileAccessDenied(path: url.path)
+        }
+        
+        defer {
+            url.stopAccessingSecurityScopedResource()
+        }
         
         return try await coordinator.convert(
             url: url,
@@ -97,6 +100,8 @@ class FileProcessor: ObservableObject {
     }
     
     func processFile(_ url: URL, outputFormat: UTType, metadata: ConversionMetadata) async throws -> ProcessingResult {
+        logger.debug("🔄 Starting file processing pipeline")
+        
         currentStage = .analyzing
         
         do {
@@ -105,20 +110,27 @@ class FileProcessor: ObservableObject {
             
             currentStage = .converting
             
-            let result = try await coordinator.convert(
-                url: url,
-                to: outputFormat,
-                metadata: metadata,
-                progress: progress
-            )
+            // Direct processing based on type instead of using coordinator
+            switch (inputType, outputFormat) {
+                case (let input, let output) where input.conforms(to: .image) && output.conforms(to: .image):
+                    let imageProcessor = ImageProcessor()
+                    let result = try await imageProcessor.processImage(
+                        url,
+                        to: outputFormat,
+                        metadata: metadata,
+                        progress: progress
+                    )
+                    currentStage = .completed
+                    return result
+                    
+                default:
+                    throw ConversionError.conversionNotPossible(reason: "Unsupported conversion type")
+            }
             
-            currentStage = .completed
-            return result
-            
-        } catch let error as ConversionError {
+        } catch {
             currentStage = .failed
-            self.error = error
-            throw error
+            self.error = error as? ConversionError ?? ConversionError.conversionFailed(reason: error.localizedDescription)
+            throw self.error!
         }
     }
     
@@ -154,28 +166,35 @@ class FileProcessor: ObservableObject {
     }
     
     private func validateCompatibility(input: UTType, output: UTType) async throws {
+        logger.debug("Validating compatibility from \(input.identifier) to \(output.identifier)")
+        
         // Check basic compatibility
         if input == output {
-            return // Same format, always compatible
+            logger.debug("Same format conversion, skipping compatibility check")
+            return
         }
         
         // Check for supported conversion paths
         switch (input, output) {
         case (let input, let output) where input.conforms(to: .image) && output.conforms(to: .image):
-            return // Image to image conversion is supported
+            logger.debug("Image to image conversion validated")
+            return
             
         case (let input, let output) where input.conforms(to: .image) && output.conforms(to: .movie):
-            // Image to video requires special handling
+            logger.debug("Checking resources for image to video conversion")
             let requiredMemory: UInt64 = 500_000_000 // 500MB
             let available = await ResourcePool.shared.getAvailableMemory()
             guard available >= requiredMemory else {
+                logger.error("Insufficient memory: required \(requiredMemory), available \(available)")
                 throw ConversionError.insufficientMemory(
                     required: requiredMemory,
                     available: available
                 )
             }
+            logger.debug("Resource check passed for image to video conversion")
             
         default:
+            logger.error("Incompatible formats: \(input.identifier) to \(output.identifier)")
             throw ConversionError.incompatibleFormats(from: input, to: output)
         }
     }
@@ -196,25 +215,43 @@ class FileProcessor: ObservableObject {
     }
     
     func determineStrategy(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {
+        logger.debug("🔍 Determining strategy for conversion")
+        logger.debug("📄 Input type: \(inputType.identifier)")
+        logger.debug("🎯 Output type: \(outputType.identifier)")
+        
         // Check basic compatibility
         if inputType == outputType {
+            logger.debug("✅ Direct conversion possible - same types")
             return .direct
         }
         
-        switch (inputType, outputType) {
+        logger.debug("⚙️ Checking format compatibility")
+        switch (inputType, to: outputType) {
+        case (let i, let o) where i.conforms(to: .image) && o.conforms(to: .image):
+            logger.debug("✅ Image to image conversion strategy selected")
+            return .direct
         case (let i, let o) where i.conforms(to: .image) && o.conforms(to: .audiovisualContent):
+            logger.debug("✅ Image to video conversion strategy selected")
             return .createVideo
         case (let i, let o) where i.conforms(to: .audio) && o.conforms(to: .audiovisualContent):
+            logger.debug("✅ Audio visualization strategy selected")
             return .visualize
         case (let i, let o) where i.conforms(to: .audiovisualContent) && o.conforms(to: .image):
+            logger.debug("✅ Frame extraction strategy selected")
             return .extractFrame
         case (let i, let o) where i.conforms(to: .audiovisualContent) && o.conforms(to: .audio):
+            logger.debug("✅ Audio extraction strategy selected")
             return .extractAudio
         case (let i, let o) where i.conforms(to: .image) && o == .pdf:
+            logger.debug("✅ Image to PDF combination strategy selected")
             return .combine
         case (.pdf, let o) where o.conforms(to: .image):
+            logger.debug("✅ PDF frame extraction strategy selected")
             return .extractFrame
         default:
+            logger.error("❌ No valid conversion strategy found")
+            logger.error("📄 Input type: \(inputType.identifier)")
+            logger.error("🎯 Output type: \(outputType.identifier)")
             throw ConversionError.incompatibleFormats(from: inputType, to: outputType)
         }
     }

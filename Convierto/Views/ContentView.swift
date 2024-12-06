@@ -170,32 +170,39 @@ struct ContentView: View {
     @State private var selectedOutputFormat: UTType = .jpeg
     @State private var isMultiFileMode = false
     
-    private let supportedTypes: [UTType] = [
+    private let supportedTypes: [UTType] = Array(Set([
         .jpeg, .png, .heic, .tiff, .gif, .bmp, .webP,
         .mpeg4Movie, .quickTimeMovie, .avi,
         .mp3, .wav, .aiff, .m4a, .aac,
         .pdf
-    ]
+    ])).sorted { $0.identifier < $1.identifier }
     
     private func supportedFormats(for operation: String) -> [String: [UTType]] {
-        switch operation {
-        case "output":
-            return [
-                "Images": [.jpeg, .png, .heic, .tiff, .gif, .webP, .bmp],
-                "Documents": [.pdf],
-                "Video": [.mpeg4Movie, .quickTimeMovie, .avi],
-                "Audio": [.mp3, .wav, .aiff, .m4a, .aac]
+        let formats: [String: [UTType]] = [
+            "Images": [
+                UTType.jpeg,
+                UTType.png,
+                UTType.heic,
+                UTType.tiff,
+                UTType.gif,
+                UTType.bmp,
+                UTType.webP
+            ],
+            "Documents": [UTType.pdf],
+            "Video": [
+                UTType.mpeg4Movie,
+                UTType.quickTimeMovie,
+                UTType.avi
+            ],
+            "Audio": [
+                UTType.mp3,
+                UTType.wav,
+                UTType.aiff,
+                UTType.m4a,
+                UTType.aac
             ]
-        case "input":
-            return [
-                "Images": [.jpeg, .png, .heic, .tiff, .gif, .webP, .bmp, .raw],
-                "Documents": [.pdf],
-                "Video": [.mpeg4Movie, .quickTimeMovie, .avi, .mpeg2Video],
-                "Audio": [.mp3, .wav, .aiff, .m4a, .aac, .midi]
-            ]
-        default:
-            return [:]
-        }
+        ]
+        return formats
     }
     
     var body: some View {

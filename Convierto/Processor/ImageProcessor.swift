@@ -4,12 +4,17 @@ import AppKit
 import ImageIO
 import CoreImage
 import AVFoundation
+import os.log
 
 // Image Processor Implementation
 class ImageProcessor: BaseConverter {
     private let ciContext: CIContext
     private let contextId: String
     private weak var processorFactory: ProcessorFactory?
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "Convierto",
+        category: "ImageProcessor"
+    )
     
     required init(settings: ConversionSettings = ConversionSettings()) {
         self.contextId = UUID().uuidString
@@ -28,13 +33,92 @@ class ImageProcessor: BaseConverter {
     }
     
     override func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
-        ResourceManager.shared.trackContext(contextId)
+        logger.debug("🔄 Starting image conversion with detailed debugging")
+        logger.debug("📍 Source URL: \(url.path)")
+        logger.debug("🎯 Target format: \(format.identifier)")
+        logger.debug("⚙️ Quality setting: \(self.settings.imageQuality)")
         
-        if format.conforms(to: .audiovisualContent) {
-            return try await handleVideoConversion(url, to: format, metadata: metadata, progress: progress)
+        // Validate input
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            logger.error("❌ Failed to create image source from URL")
+            logger.debug("🔍 URL validation failed - Path: \(url.path)")
+            throw ConversionError.invalidInput
         }
         
-        return try await handleImageConversion(url, to: format, metadata: metadata, progress: progress)
+        // Get source properties for debugging
+        if let properties = CGImageSourceCopyProperties(imageSource, nil) as? [CFString: Any] {
+            logger.debug("📊 Source image properties: \(properties)")
+        }
+        
+        // Get source format
+        guard let sourceUTI = CGImageSourceGetType(imageSource) as String?,
+              let sourceType = UTType(sourceUTI) else {
+            logger.error("❌ Failed to determine source image type")
+            logger.debug("🔍 Source UTI: ")
+            throw ConversionError.invalidInput
+        }
+        
+        logger.debug("📄 Source type: \(sourceType.identifier)")
+        
+        // Create output URL
+        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
+        logger.debug("📂 Output URL: \(outputURL.path)")
+        
+        // Configure destination options with detailed logging
+        let destinationOptions: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: settings.imageQuality,
+            kCGImageDestinationOptimizeColorForSharing: true
+        ]
+        logger.debug("⚙️ Destination options: \(destinationOptions)")
+        
+        guard let destination = CGImageDestinationCreateWithURL(
+            outputURL as CFURL,
+            format.identifier as CFString,
+            1,
+            nil
+        ) else {
+            logger.error("❌ Failed to create image destination")
+            logger.debug("💾 Destination creation failed for URL: \(outputURL.path)")
+            throw ConversionError.exportFailed(reason: "Failed to create image destination")
+        }
+        
+        do {
+            if let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) {
+                logger.debug("✅ CGImage created successfully")
+                logger.debug("📐 Image dimensions: \(cgImage.width)x\(cgImage.height)")
+                logger.debug("🎨 Color space: \(cgImage.colorSpace?.name ?? "unknown" as CFString)")
+                logger.debug("⚡️ Bits per component: \(cgImage.bitsPerComponent)")
+                logger.debug("🔢 Bits per pixel: \(cgImage.bitsPerPixel)")
+                
+                // Add image to destination with detailed error handling
+                CGImageDestinationAddImage(destination, cgImage, destinationOptions as CFDictionary)
+                
+                if CGImageDestinationFinalize(destination) {
+                    logger.debug("✅ Image conversion successful")
+                    logger.debug("📦 Output file size: x bytes")
+                    
+                    return ProcessingResult(
+                        outputURL: outputURL,
+                        originalFileName: metadata.originalFileName ?? "image",
+                        suggestedFileName: "converted_image." + (format.preferredFilenameExtension ?? "jpg"),
+                        fileType: format,
+                        metadata: nil
+                    )
+                } else {
+                    logger.error("❌ Failed to finalize image destination")
+                    logger.debug("💾 Finalization failed for URL: \(outputURL.path)")
+                    throw ConversionError.exportFailed(reason: "Failed to write image to disk")
+                }
+            } else {
+                logger.error("❌ Failed to create CGImage from source")
+                logger.debug("🔍 Source image creation failed")
+                throw ConversionError.conversionFailed(reason: "Failed to process image data")
+            }
+        } catch {
+            logger.error("❌ Conversion failed with error: \(error.localizedDescription)")
+            logger.debug("⚠️ Error details: \(error)")
+            throw error
+        }
     }
     
     private func handleVideoConversion(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
@@ -58,31 +142,49 @@ class ImageProcessor: BaseConverter {
     }
     
     private func handleImageConversion(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
-        // Validate input format
+        // Load image data
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             throw ConversionError.invalidInput
         }
         
-        // Create output URL with proper extension
         let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
         
-        // Configure conversion settings
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceShouldCache: false,
-            kCGImageSourceShouldAllowFloat: true
-        ]
-        
-        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, options as CFDictionary) else {
-            throw ConversionError.conversionFailed(reason: "Failed to create image")
+        // Create destination with proper type identifier
+        guard let destination = CGImageDestinationCreateWithURL(
+            outputURL as CFURL,
+            format.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw ConversionError.exportFailed(reason: "Failed to create image destination")
         }
         
-        // Create NSImage from CGImage
-        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        // Configure destination options
+        let destinationOptions: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: settings.imageQuality,
+            kCGImageDestinationOptimizeColorForSharing: true
+        ]
         
-        // Save with proper format
-        try await saveImage(nsImage, format: format, to: outputURL, metadata: metadata)
+        // Copy source image with options
+        if let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) {
+            CGImageDestinationAddImageFromSource(
+                destination,
+                imageSource,
+                0,
+                properties as CFDictionary
+            )
+        } else {
+            // Fallback if properties cannot be copied
+            guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+                throw ConversionError.conversionFailed(reason: "Failed to create image")
+            }
+            CGImageDestinationAddImage(destination, cgImage, destinationOptions as CFDictionary)
+        }
+        
+        // Finalize the destination
+        guard CGImageDestinationFinalize(destination) else {
+            throw ConversionError.exportFailed(reason: "Failed to write image to disk")
+        }
         
         return ProcessingResult(
             outputURL: outputURL,
@@ -141,23 +243,24 @@ class ImageProcessor: BaseConverter {
         outputURL: URL,
         settings: ConversionSettings = ConversionSettings()
     ) async throws -> ProcessingResult {
-        guard let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
-            throw ConversionError.conversionFailed(reason: "Failed to read image properties")
-        }
         
-        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+        // Configure conversion options
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldAllowFloat: true
+        ]
+        
+        progress.completedUnitCount = 30
+        
+        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, options as CFDictionary) else {
             throw ConversionError.conversionFailed(reason: "Failed to create image")
         }
         
-        // Apply image processing
-        let processedImage = try await applyImageProcessing(cgImage)
+        progress.completedUnitCount = 50
         
-        // Configure output options
-        let destinationOptions: [CFString: Any] = [
-            kCGImageDestinationLossyCompressionQuality: settings.imageQuality,
-            kCGImageDestinationOptimizeColorForSharing: true
-        ]
-        
+        // Create destination
         guard let destination = CGImageDestinationCreateWithURL(
             outputURL as CFURL,
             outputFormat.identifier as CFString,
@@ -167,28 +270,32 @@ class ImageProcessor: BaseConverter {
             throw ConversionError.exportFailed(reason: "Failed to create image destination")
         }
         
-        if settings.preserveMetadata,
-           let imageMetadata = CGImageSourceCopyMetadataAtIndex(imageSource, 0, nil) {
-            CGImageDestinationAddImageAndMetadata(
-                destination,
-                processedImage,
-                imageMetadata,
-                destinationOptions as CFDictionary
-            )
-        } else {
-            CGImageDestinationAddImage(destination, processedImage, destinationOptions as CFDictionary)
-        }
+        progress.completedUnitCount = 70
         
+        // Configure destination options
+        let destinationOptions: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: settings.imageQuality,
+            kCGImageDestinationOptimizeColorForSharing: true
+        ]
+        
+        // Add image to destination
+        CGImageDestinationAddImage(destination, cgImage, destinationOptions as CFDictionary)
+        
+        progress.completedUnitCount = 90
+        
+        // Finalize
         guard CGImageDestinationFinalize(destination) else {
             throw ConversionError.exportFailed(reason: "Failed to write image to disk")
         }
         
+        progress.completedUnitCount = 100
+        
         return ProcessingResult(
             outputURL: outputURL,
-            originalFileName: metadata.originalFileName,
-            suggestedFileName: (metadata.originalFileName?.components(separatedBy: ".")[0] ?? "converted_image") + "." + (outputFormat.preferredFilenameExtension ?? "img"),
+            originalFileName: metadata.originalFileName ?? "image",
+            suggestedFileName: "converted_image." + (outputFormat.preferredFilenameExtension ?? "jpg"),
             fileType: outputFormat,
-            metadata: properties
+            metadata: nil
         )
     }
     
@@ -386,28 +493,81 @@ class ImageProcessor: BaseConverter {
     }
     
     override func validateConversion(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {
+        logger.debug("Validating conversion from \(inputType.identifier) to \(outputType.identifier)")
+        
         guard canConvert(from: inputType, to: outputType) else {
+            logger.error("Incompatible formats detected")
             throw ConversionError.incompatibleFormats(from: inputType, to: outputType)
         }
         
-        if inputType.conforms(to: .image) {
-            if outputType.conforms(to: .audiovisualContent) {
-                return .createVideo
-            } else if outputType.conforms(to: .image) {
-                return .direct
-            }
+        if inputType.conforms(to: .image) && outputType.conforms(to: .image) {
+            logger.debug("Using direct conversion strategy for image to image")
+            return .direct
         }
         
-        throw ConversionError.incompatibleFormats(from: inputType, to: outputType)
+        if inputType.conforms(to: .image) && outputType.conforms(to: .audiovisualContent) {
+            logger.debug("Using createVideo strategy for image to video")
+            return .createVideo
+        }
+        
+        logger.error("No valid conversion strategy found")
+        throw ConversionError.conversionNotPossible(reason: "No valid conversion strategy")
     }
     
     override func canConvert(from: UTType, to: UTType) -> Bool {
-        // Check if both types are images
+        logger.debug("⚙️ Checking conversion compatibility: \(from.identifier) -> \(to.identifier)")
+        
+        // Allow conversion between any image formats
         if from.conforms(to: .image) && to.conforms(to: .image) {
-            // Explicitly support common image conversions
-            let supportedFormats: Set<UTType> = [.jpeg, .png, .tiff, .gif, .heic]
-            return supportedFormats.contains(from) || supportedFormats.contains(to)
+            logger.debug("✅ Compatible image formats detected")
+            return true
         }
+        
+        logger.debug("❌ Incompatible formats")
         return false
+    }
+    
+    func processImage(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+        logger.debug("🔄 Starting image conversion with detailed debugging")
+        
+        // Create image source
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            throw ConversionError.invalidInput
+        }
+        
+        // Create output URL
+        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
+        
+        // Configure destination options
+        let destinationOptions: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: settings.imageQuality,
+            kCGImageDestinationOptimizeColorForSharing: true
+        ]
+        
+        guard let destination = CGImageDestinationCreateWithURL(
+            outputURL as CFURL,
+            format.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw ConversionError.exportFailed(reason: "Failed to create image destination")
+        }
+        
+        // Perform conversion
+        if let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) {
+            CGImageDestinationAddImage(destination, cgImage, destinationOptions as CFDictionary)
+            
+            if CGImageDestinationFinalize(destination) {
+                return ProcessingResult(
+                    outputURL: outputURL,
+                    originalFileName: metadata.originalFileName ?? "image",
+                    suggestedFileName: "converted_image." + (format.preferredFilenameExtension ?? "jpg"),
+                    fileType: format,
+                    metadata: nil
+                )
+            }
+        }
+        
+        throw ConversionError.conversionFailed(reason: "Failed to process image")
     }
 }
