@@ -112,27 +112,11 @@ class AudioProcessor: BaseConverter, MediaConverting {
         
         let duration = try await asset.load(.duration)
         let frameCount = Int(duration.seconds * Double(settings.frameRate))
-        let frames = try await visualizer.generateVisualizationFrames(for: asset, frameCount: frameCount)
         
-        // Create video track from visualization frames
-        let videoTrack = try await visualizer.createVideoTrack(from: frames, duration: duration)
-        
-        // Create final composition
+        // Create video composition
         let composition = AVMutableComposition()
         
-        // Add video track
-        if let compositionVideoTrack = composition.addMutableTrack(
-            withMediaType: .video,
-            preferredTrackID: kCMPersistentTrackID_Invalid
-        ) {
-            try compositionVideoTrack.insertTimeRange(
-                CMTimeRange(start: .zero, duration: duration),
-                of: videoTrack,
-                at: .zero
-            )
-        }
-        
-        // Add audio track
+        // Add audio track with proper settings
         if let audioTrack = try await asset.loadTracks(withMediaType: .audio).first,
            let compositionAudioTrack = composition.addMutableTrack(
             withMediaType: .audio,
@@ -145,19 +129,56 @@ class AudioProcessor: BaseConverter, MediaConverting {
             )
         }
         
-        // Export final video
-        guard let exportSession = try await createExportSession(
-            for: composition,
-            outputFormat: format,
-            isAudioOnly: false
+        // Generate visualization frames
+        progress.totalUnitCount = Int64(frameCount)
+        let frames = try await visualizer.generateVisualizationFrames(
+            for: asset,
+            frameCount: frameCount
+        )
+        
+        // Create video track from frames
+        let videoTrack = try await visualizer.createVideoTrack(
+            from: frames,
+            duration: duration,
+            settings: settings
+        )
+        
+        // Add video track to composition
+        if let compositionVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) {
+            try compositionVideoTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: duration),
+                of: videoTrack,
+                at: .zero
+            )
+        }
+        
+        // Export with proper settings
+        guard let exportSession = AVAssetExportSession(
+            asset: composition,
+            presetName: settings.videoQuality
         ) else {
             throw ConversionError.exportFailed
         }
         
         exportSession.outputURL = outputURL
-        exportSession.outputFileType = getAVFileType(for: format)
+        exportSession.outputFileType = format == .quickTimeMovie ? .mov : .mp4
+        
+        // Monitor export progress using async/await
+        let progressTask = Task {
+            while !Task.isCancelled {
+                progress.completedUnitCount = Int64(exportSession.progress * 100)
+                if exportSession.status == .completed || exportSession.status == .failed {
+                    break
+                }
+                try await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
+            }
+        }
         
         await exportSession.export()
+        progressTask.cancel()
         
         guard exportSession.status == .completed else {
             throw ConversionError.exportFailed

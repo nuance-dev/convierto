@@ -23,6 +23,7 @@ enum ConversionError: LocalizedError {
     case fileAccessDenied
     case sandboxViolation
     case processingFailed
+    case timeout
     
     var errorDescription: String? {
         switch self {
@@ -52,6 +53,8 @@ enum ConversionError: LocalizedError {
             return "Cannot access this file due to system security. Try moving it to a different location."
         case .processingFailed:
             return "Failed to process the media file"
+        case .timeout:
+            return "Conversion timed out"
         }
     }
 }
@@ -69,11 +72,39 @@ class FileProcessor: ObservableObject {
     @Published private(set) var progress: Double = 0
     @Published var processingResult: ProcessingResult?
     
-    private let imageProcessor = ImageProcessor()
-    private let videoProcessor = VideoProcessor()
-    private let audioProcessor = AudioProcessor()
-    private let documentProcessor = DocumentProcessor()
+    private let imageProcessor: ImageProcessor
+    private let videoProcessor: VideoProcessor
+    private let audioProcessor: AudioProcessor
+    private let documentProcessor: DocumentProcessor
     private let fileManager = FileManager.default
+    private var cancellables = Set<AnyCancellable>()
+    
+    // Memory management
+    private let memoryPressureHandler = MemoryPressureHandler()
+    private let resourceMonitor = ResourceMonitor()
+    
+    init() {
+        let settings = ConversionSettings()
+        self.imageProcessor = ImageProcessor(settings: settings)
+        self.videoProcessor = VideoProcessor(settings: settings)
+        self.audioProcessor = AudioProcessor(settings: settings)
+        self.documentProcessor = DocumentProcessor(settings: settings)
+        
+        setupMemoryPressureHandling()
+    }
+    
+    private func setupMemoryPressureHandling() {
+        memoryPressureHandler.onPressureChange = { [weak self] pressure in
+            switch pressure {
+            case .warning:
+                self?.cleanupTemporaryResources()
+            case .critical:
+                self?.cancelCurrentOperations()
+            default:
+                break
+            }
+        }
+    }
     
     func processFile(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
         logger.info("Starting file processing for URL: \(url.lastPathComponent)")
@@ -83,99 +114,100 @@ class FileProcessor: ObservableObject {
             self.progress = 0
         }
         
-        // Create security-scoped bookmark
-        let bookmarkData = try url.bookmarkData(
-            options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        )
-        
-        var isStale = false
-        guard let resolvedURL = try? URL(
-            resolvingBookmarkData: bookmarkData,
-            options: .withSecurityScope,
-            relativeTo: nil,
-            bookmarkDataIsStale: &isStale
-        ) else {
-            throw ConversionError.fileAccessDenied
-        }
-        
-        guard resolvedURL.startAccessingSecurityScopedResource() else {
-            throw ConversionError.sandboxViolation
-        }
-        
+        // Resource monitoring
+        let monitor = resourceMonitor.startMonitoring()
         defer {
-            resolvedURL.stopAccessingSecurityScopedResource()
+            monitor.stop()
+            cleanupTemporaryResources()
         }
-        
-        let resourceValues = try await resolvedURL.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey])
-        guard let inputType = resourceValues.contentType else {
-            logger.error("Invalid input type for file: \(url.lastPathComponent)")
-            throw ConversionError.invalidInput
-        }
-        
-        logger.debug("Input type: \(inputType.identifier), Output format: \(outputFormat.identifier)")
-        
-        if let fileSize = resourceValues.fileSize {
-            logger.debug("File size: \(fileSize) bytes")
-            if fileSize > 100_000_000 {
-                logger.error("File too large: \(fileSize) bytes")
-                throw ConversionError.fileTooLarge
-            }
-        }
-        
-        if inputType == outputFormat {
-            logger.notice("Input and output formats are identical: \(inputType.identifier)")
-            throw ConversionError.sameFormat
-        }
-        
-        let progress = Progress(totalUnitCount: 100)
-        progress.publisher(for: \.fractionCompleted)
-            .receive(on: RunLoop.main)
-            .sink { [weak self] value in
-                self?.progress = value
-            }
-            .store(in: &cancellables)
         
         do {
-            let result: ProcessingResult
-            
-            switch (inputType, outputFormat) {
-            // Audio to Video conversion
-            case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .audiovisualContent):
-                result = try await audioProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-                
-            // Video to Audio extraction
-            case (let input, let output) where input.conforms(to: .audiovisualContent) && output.conforms(to: .audio):
-                result = try await videoProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-                
-            // Image to Video conversion
-            case (let input, let output) where input.conforms(to: .image) && output.conforms(to: .audiovisualContent):
-                result = try await imageProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-                
-            // Video to Image sequence
-            case (let input, let output) where input.conforms(to: .audiovisualContent) && output.conforms(to: .image):
-                result = try await videoProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-                
-            // Standard conversions
-            case (let input, _) where input.conforms(to: .audio):
-                result = try await audioProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-            case (let input, _) where input.conforms(to: .audiovisualContent):
-                result = try await videoProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-            case (let input, _) where input.conforms(to: .image):
-                result = try await imageProcessor.convert(resolvedURL, to: outputFormat, progress: progress)
-            default:
-                throw ConversionError.incompatibleFormats
+            let result = try await processFileWithValidation(url, outputFormat: outputFormat)
+            await MainActor.run {
+                self.progress = 1.0
+                self.isProcessing = false
             }
-            
             return result
         } catch {
-            logger.error("Conversion failed: \(error.localizedDescription)")
+            await MainActor.run {
+                self.isProcessing = false
+            }
             throw error
         }
     }
     
-    private var cancellables = Set<AnyCancellable>()
+    private func processFileWithValidation(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
+        // Validate input file
+        let validator = FileValidator()
+        try await validator.validateFile(url)
+        
+        // Determine conversion type and process
+        let converter = try await determineConverter(for: url, targetFormat: outputFormat)
+        
+        // Setup progress tracking
+        let progress = Progress(totalUnitCount: 100)
+        setupProgressTracking(progress)
+        
+        // Process with timeout protection
+        return try await withTimeout(seconds: 300) {
+            try await converter.convert(url, to: outputFormat, progress: progress)
+        }
+    }
+    
+    private func determineConverter(for url: URL, targetFormat: UTType) async throws -> MediaConverting {
+        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+        guard let inputType = resourceValues.contentType else {
+            throw ConversionError.invalidInput
+        }
+        
+        // Enhanced conversion logic
+        switch (inputType, targetFormat) {
+        case (let input, let output) where input.conforms(to: .image):
+            if output.conforms(to: .audiovisualContent) {
+                return videoProcessor
+            }
+            return imageProcessor
+            
+        case (let input, let output) where input.conforms(to: .audio):
+            if output.conforms(to: .audiovisualContent) {
+                return videoProcessor
+            }
+            return audioProcessor
+            
+        case (let input, let output) where input.conforms(to: .audiovisualContent):
+            if output.conforms(to: .image) {
+                return imageProcessor
+            } else if output.conforms(to: .audio) {
+                return audioProcessor
+            }
+            return videoProcessor
+            
+        case (.pdf, _), (_, .pdf):
+            return documentProcessor
+            
+        default:
+            throw ConversionError.incompatibleFormats
+        }
+    }
+    
+    private func setupProgressTracking(_ progress: Progress) {
+        progress.publisher(for: \.fractionCompleted)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                self?.progress = value
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func cleanupTemporaryResources() {
+        try? CacheManager.shared.cleanupOldFiles()
+    }
+    
+    private func cancelCurrentOperations() {
+        cancellables.removeAll()
+        isProcessing = false
+        progress = 0
+    }
 }
 
 // MARK: - Format Validation

@@ -132,10 +132,9 @@ class MultiFileProcessor: ObservableObject {
         panel.canCreateDirectories = true
         panel.showsTagField = false
         
-        // Get the suggested filename with the correct extension
-        let originalURL = URL(fileURLWithPath: originalName)
-        let filenameWithoutExt = originalURL.deletingPathExtension().lastPathComponent
+        // Get the correct extension for the current format
         let newExtension = selectedOutputFormat.preferredFilenameExtension ?? "converted"
+        let filenameWithoutExt = URL(fileURLWithPath: originalName).deletingPathExtension().lastPathComponent
         let suggestedFilename = "\(filenameWithoutExt)_converted.\(newExtension)"
         
         panel.nameFieldStringValue = suggestedFilename
@@ -152,7 +151,9 @@ class MultiFileProcessor: ObservableObject {
                     try FileManager.default.removeItem(at: saveURL)
                 }
                 
-                try FileManager.default.copyItem(at: url, to: saveURL)
+                // Ensure correct extension on the output file
+                let finalURL = saveURL.deletingPathExtension().appendingPathExtension(newExtension)
+                try FileManager.default.copyItem(at: url, to: finalURL)
             } catch {
                 print("Failed to save file: \(error.localizedDescription)")
             }

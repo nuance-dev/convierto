@@ -75,4 +75,30 @@ class CacheManager {
             self?.cleanupOldFiles()
         }
     }
+    
+    func cleanupTemporaryFiles() throws {
+        let fileManager = FileManager.default
+        let resourceKeys: [URLResourceKey] = [.creationDateKey, .isDirectoryKey]
+        
+        guard let enumerator = fileManager.enumerator(
+            at: cacheDirectory,
+            includingPropertiesForKeys: resourceKeys,
+            options: .skipsHiddenFiles
+        ) else { return }
+        
+        let cutoffDate = Date().addingTimeInterval(-maxCacheAge)
+        
+        while let fileURL = enumerator.nextObject() as? URL {
+            do {
+                let resourceValues = try fileURL.resourceValues(forKeys: Set(resourceKeys))
+                if let creationDate = resourceValues.creationDate,
+                   let isDirectory = resourceValues.isDirectory,
+                   !isDirectory && creationDate < cutoffDate {
+                    try fileManager.removeItem(at: fileURL)
+                }
+            } catch {
+                print("Error cleaning up file at \(fileURL): \(error)")
+            }
+        }
+    }
 }

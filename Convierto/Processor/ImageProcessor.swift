@@ -6,42 +6,100 @@ import CoreImage
 import AVFoundation
 
 // Image Processor Implementation
-class ImageProcessor {
-    private let settings: ConversionSettings
-    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+class ImageProcessor: MediaConverting {
+    let settings: ConversionSettings
+    private let ciContext = CIContext()
+    private let videoProcessor: VideoProcessor
     
     init(settings: ConversionSettings = ConversionSettings()) {
         self.settings = settings
+        self.videoProcessor = VideoProcessor(settings: settings)
+    }
+    
+    func canConvert(from: UTType, to: UTType) -> Bool {
+        // Support image to image conversions
+        if from.conforms(to: .image) && to.conforms(to: .image) {
+            return true
+        }
+        
+        // Support image to video conversions
+        if from.conforms(to: .image) && to.conforms(to: .audiovisualContent) {
+            return true
+        }
+        
+        return false
     }
     
     func convert(_ inputURL: URL, to format: UTType, progress: Progress) async throws -> ProcessingResult {
-        let sourceOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceShouldCacheImmediately: true
-        ]
-        
-        guard let imageSource = CGImageSourceCreateWithURL(inputURL as CFURL, sourceOptions as CFDictionary) else {
+        guard let imageSource = CGImageSourceCreateWithURL(inputURL as CFURL, nil) else {
             throw ConversionError.invalidInput
         }
         
         // Special handling for different conversion types
-        if format.conforms(to: .video) {
-            return try await convertToVideo(imageSource: imageSource, format: format, progress: progress, inputURL: inputURL)
-        } else if format.conforms(to: .gif) {
-            return try await convertToAnimatedGIF(imageSource: imageSource, progress: progress, inputURL: inputURL)
+        if format.conforms(to: .audiovisualContent) {
+            guard let image = NSImage(contentsOf: inputURL) else {
+                throw ConversionError.invalidInput
+            }
+            return try await createVideoFromImage(image, format: format, progress: progress)
         }
         
-        // Regular image conversion with enhanced processing
-        let result = try await processImage(
-            imageSource: imageSource,
-            outputFormat: format,
-            progress: progress,
-            inputURL: inputURL
-        )
+        // Process image with enhanced error handling
+        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+            throw ConversionError.conversionFailed
+        }
+        
+        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        let outputURL = try CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
+        
+        try await saveImage(nsImage, format: format, to: outputURL)
         
         progress.completedUnitCount = 100
-        return result
+        
+        return ProcessingResult(
+            outputURL: outputURL,
+            originalFileName: inputURL.lastPathComponent,
+            suggestedFileName: inputURL.deletingPathExtension().lastPathComponent + "." + (format.preferredFilenameExtension ?? "jpg"),
+            fileType: format
+        )
+    }
+    
+    func createVideoFromImage(_ image: NSImage, format: UTType, progress: Progress) async throws -> ProcessingResult {
+        let outputURL = try CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
+        
+        let videoWriter = try AVAssetWriter(url: outputURL, fileType: .mp4)
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(image.size.width),
+            AVVideoHeightKey: Int(image.size.height)
+        ]
+        
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB)
+            ]
+        )
+        
+        videoWriter.add(videoInput)
+        videoWriter.startWriting()
+        videoWriter.startSession(atSourceTime: .zero)
+        
+        if let buffer = try await createPixelBuffer(from: image) {
+            let frameDuration = CMTime(seconds: settings.videoDuration, preferredTimescale: 600)
+            adaptor.append(buffer, withPresentationTime: .zero)
+            try await Task.sleep(nanoseconds: UInt64(settings.videoDuration * 1_000_000_000))
+        }
+        
+        videoInput.markAsFinished()
+        await videoWriter.finishWriting()
+        
+        return ProcessingResult(
+            outputURL: outputURL,
+            originalFileName: "image_to_video",
+            suggestedFileName: "converted_video." + (format.preferredFilenameExtension ?? "mp4"),
+            fileType: format
+        )
     }
     
     private func processImage(
@@ -110,188 +168,44 @@ class ImageProcessor {
     }
     
     private func applyImageProcessing(_ image: CGImage) async throws -> CGImage {
+        // Create a new CIContext for each processing operation
+        let context = CIContext(options: [
+            .cacheIntermediates: false,
+            .allowLowPower: true
+        ])
+        
         let ciImage = CIImage(cgImage: image)
         var processedImage = ciImage
         
-        if settings.enhanceImage {
-            if let filter = CIFilter(name: "CIPhotoEffectInstant") {
-                filter.setValue(processedImage, forKey: kCIInputImageKey)
-                processedImage = filter.outputImage ?? processedImage
-            }
-        }
-        
-        if settings.adjustColors {
-            if let filter = CIFilter(name: "CIColorControls") {
-                filter.setValue(processedImage, forKey: kCIInputImageKey)
-                filter.setValue(settings.saturation, forKey: kCIInputSaturationKey)
-                filter.setValue(settings.brightness, forKey: kCIInputBrightnessKey)
-                filter.setValue(settings.contrast, forKey: kCIInputContrastKey)
-                processedImage = filter.outputImage ?? processedImage
-            }
-        }
-        
-        guard let cgImage = ciContext.createCGImage(processedImage, from: processedImage.extent) else {
-            throw ConversionError.conversionFailed
-        }
-        
-        return cgImage
-    }
-    
-    private func convertToVideo(imageSource: CGImageSource, format: UTType, progress: Progress, inputURL: URL) async throws -> ProcessingResult {
-        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
-            throw ConversionError.conversionFailed
-        }
-        
-        let composition = AVMutableComposition()
-        let videoComposition = AVMutableVideoComposition()
-        
-        guard let videoTrack = composition.addMutableTrack(
-            withMediaType: .video,
-            preferredTrackID: kCMPersistentTrackID_Invalid
-        ) else {
-            throw ConversionError.conversionFailed
-        }
-        
-        let duration = CMTime(seconds: settings.videoDuration, preferredTimescale: 600)
-        let size = CGSize(
-            width: cgImage.width,
-            height: cgImage.height
-        )
-        
-        let frameCount = Int(duration.seconds * Double(settings.frameRate))
-        let frameDuration = CMTime(value: 1, timescale: CMTimeScale(settings.frameRate))
-        
-        let animation = try await createImageAnimation(cgImage, frameCount: frameCount)
-        
-        for (index, frame) in animation.enumerated() {
-            let time = CMTime(value: CMTimeValue(index), timescale: CMTimeScale(settings.frameRate))
-            try await insertFrame(frame, at: time, duration: frameDuration, into: videoTrack)
-            progress.completedUnitCount = Int64((Double(index) / Double(frameCount)) * 50)
-        }
-        
-        videoComposition.renderSize = size
-        videoComposition.frameDuration = frameDuration
-        
-        let outputURL = try CacheManager.shared.createTemporaryURL(for: "video_output")
-        
-        guard let export = AVAssetExportSession(
-            asset: composition,
-            presetName: settings.videoQuality
-        ) else {
-            throw ConversionError.exportFailed
-        }
-        
-        export.outputURL = outputURL
-        export.outputFileType = format == .quickTimeMovie ? .mov : .mp4
-        export.videoComposition = videoComposition
-        
-        await export.export()
-        
-        guard export.status == .completed else {
-            throw export.error ?? ConversionError.exportFailed
-        }
-        
-        return ProcessingResult(
-            outputURL: outputURL,
-            originalFileName: inputURL.lastPathComponent,
-            suggestedFileName: inputURL.deletingPathExtension().lastPathComponent + "." + (format.preferredFilenameExtension ?? "mp4"),
-            fileType: format
-        )
-    }
-    
-    private func convertToAnimatedGIF(imageSource: CGImageSource, progress: Progress, inputURL: URL) async throws -> ProcessingResult {
-        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
-            throw ConversionError.conversionFailed
-        }
-        
-        let frameCount = settings.gifFrameCount
-        let animation = try await createImageAnimation(cgImage, frameCount: frameCount)
-        
-        let outputURL = try CacheManager.shared.createTemporaryURL(for: "animated.gif")
-        guard let destination = CGImageDestinationCreateWithURL(
-            outputURL as CFURL,
-            UTType.gif.identifier as CFString,
-            frameCount,
-            nil
-        ) else {
-            throw ConversionError.exportFailed
-        }
-        
-        // Configure GIF properties
-        let gifProperties = [
-            kCGImagePropertyGIFDictionary: [
-                kCGImagePropertyGIFLoopCount: 0,
-                kCGImagePropertyGIFHasGlobalColorMap: true,
-                kCGImagePropertyColorModel: kCGImagePropertyColorModelRGB,
-                kCGImagePropertyDepth: 8
-            ]
-        ] as CFDictionary
-        
-        let frameProperties = [
-            kCGImagePropertyGIFDictionary: [
-                kCGImagePropertyGIFDelayTime: settings.gifFrameDuration
-            ]
-        ] as CFDictionary
-        
-        CGImageDestinationSetProperties(destination, gifProperties)
-        
-        // Add frames to GIF
-        for (index, frame) in animation.enumerated() {
-            CGImageDestinationAddImage(destination, frame, frameProperties)
-            progress.completedUnitCount = Int64((Double(index) / Double(frameCount)) * 100)
-        }
-        
-        guard CGImageDestinationFinalize(destination) else {
-            throw ConversionError.exportFailed
-        }
-        
-        return ProcessingResult(
-            outputURL: outputURL,
-            originalFileName: inputURL.lastPathComponent,
-            suggestedFileName: inputURL.deletingPathExtension().lastPathComponent + ".gif",
-            fileType: .gif
-        )
-    }
-    
-    private func createImageAnimation(_ image: CGImage, frameCount: Int) async throws -> [CGImage] {
-        var frames: [CGImage] = []
-        let context = CIContext()
-        
-        // Fix CIImage initialization
-        let ciImage = CIImage(cgImage: image)
-        if ciImage == nil {
-            throw ConversionError.conversionFailed
-        }
-        
-        for i in 0..<frameCount {
-            let progress = Double(i) / Double(frameCount)
-            
-            // Apply animation effects
-            var animatedImage = ciImage
-            
-            if settings.animationStyle == .zoom {
-                let scale = 1.0 + (0.2 * sin(progress * .pi * 2))
-                animatedImage = animatedImage.transformed(
-                    by: CGAffineTransform(scaleX: scale, y: scale)
-                )
-            } else if settings.animationStyle == .rotate {
-                animatedImage = animatedImage.transformed(
-                    by: CGAffineTransform(rotationAngle: progress * .pi * 2)
-                )
+        // Use autoreleasepool to manage memory during processing
+        return try await autoreleasepool {
+            if settings.enhanceImage {
+                if let filter = CIFilter(name: "CIPhotoEffectInstant") {
+                    filter.setValue(processedImage, forKey: kCIInputImageKey)
+                    if let output = filter.outputImage {
+                        processedImage = output
+                    }
+                }
             }
             
-            // Convert back to CGImage
-            guard let frameImage = context.createCGImage(
-                animatedImage,
-                from: animatedImage.extent
-            ) else {
+            if settings.adjustColors {
+                if let filter = CIFilter(name: "CIColorControls") {
+                    filter.setValue(processedImage, forKey: kCIInputImageKey)
+                    filter.setValue(settings.saturation, forKey: kCIInputSaturationKey)
+                    filter.setValue(settings.brightness, forKey: kCIInputBrightnessKey)
+                    filter.setValue(settings.contrast, forKey: kCIInputContrastKey)
+                    if let output = filter.outputImage {
+                        processedImage = output
+                    }
+                }
+            }
+            
+            guard let cgImage = context.createCGImage(processedImage, from: processedImage.extent) else {
                 throw ConversionError.conversionFailed
             }
             
-            frames.append(frameImage)
+            return cgImage
         }
-        
-        return frames
     }
     
     private func insertFrame(
@@ -326,7 +240,7 @@ class ImageProcessor {
     }
     
     func saveImage(_ image: NSImage, format: UTType, to url: URL) async throws {
-        guard let imageRep = NSBitmapImageRep(data: image.tiffRepresentation!) else {
+        guard let imageRep = NSBitmapImageRep(data: image.tiffRepresentation ?? Data()) else {
             throw ConversionError.conversionFailed
         }
         

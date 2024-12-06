@@ -60,4 +60,28 @@ class BaseConverter {
         audioMix.inputParameters = [parameters]
         return audioMix
     }
+    
+    func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            // Add the main operation
+            group.addTask {
+                try await operation()
+            }
+            
+            // Add timeout task
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw ConversionError.timeout
+            }
+            
+            // Get first completed result
+            guard let result = try await group.next() else {
+                throw ConversionError.timeout
+            }
+            
+            // Cancel remaining tasks
+            group.cancelAll()
+            return result
+        }
+    }
 }

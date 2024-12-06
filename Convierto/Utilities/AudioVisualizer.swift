@@ -22,7 +22,10 @@ class AudioVisualizer {
         self.size = size
     }
     
-    func generateVisualizationFrames(for asset: AVAsset, frameCount: Int) async throws -> [CGImage] {
+    func generateVisualizationFrames(
+        for asset: AVAsset,
+        frameCount: Int
+    ) async throws -> [CGImage] {
         logger.debug("Generating visualization frames")
         var frames: [CGImage] = []
         let duration = try await asset.load(.duration)
@@ -207,7 +210,11 @@ class AudioVisualizer {
         }
     }
     
-    func createVideoTrack(from frames: [CGImage], duration: CMTime) async throws -> AVAssetTrack {
+    func createVideoTrack(
+        from frames: [CGImage],
+        duration: CMTime,
+        settings: ConversionSettings
+    ) async throws -> AVAssetTrack {
         let frameURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("mov")
