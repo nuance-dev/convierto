@@ -238,4 +238,102 @@ class VideoProcessor: BaseConverter {
         
         return metadata
     }
+    
+    func createVideoFromImage(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+        logger.debug("🎬 Starting image to video conversion")
+        logger.debug("📂 Source image: \(url.path)")
+        logger.debug("🎯 Target format: \(format.identifier)")
+        
+        // Create temporary URL for output
+        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
+        logger.debug("📝 Output URL created: \(outputURL.path)")
+        
+        // Load source image
+        guard let image = NSImage(contentsOf: url) else {
+            logger.error("❌ Failed to load source image")
+            throw ConversionError.invalidInput
+        }
+        logger.debug("✅ Source image loaded successfully")
+        
+        // Create video settings
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: image.size.width,
+            AVVideoHeightKey: image.size.height
+        ]
+        logger.debug("⚙️ Video settings configured: \(videoSettings)")
+        
+        // Create AVAssetWriter
+        guard let assetWriter = try? AVAssetWriter(url: outputURL, fileType: .mp4) else {
+            logger.error("❌ Failed to create asset writer")
+            throw ConversionError.conversionFailed(reason: "Failed to create video writer")
+        }
+        
+        // Add video input
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput,
+            sourcePixelBufferAttributes: nil
+        )
+        
+        assetWriter.add(videoInput)
+        logger.debug("✅ Video input configured")
+        
+        // Start writing session
+        assetWriter.startWriting()
+        assetWriter.startSession(atSourceTime: .zero)
+        logger.debug("🎬 Started writing session")
+        
+        // Create pixel buffer
+        var pixelBuffer: CVPixelBuffer?
+        let attrs = [
+            kCVPixelBufferCGImageCompatibilityKey: kCFBooleanTrue,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: kCFBooleanTrue
+        ] as CFDictionary
+        
+        CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            Int(image.size.width),
+            Int(image.size.height),
+            kCVPixelFormatType_32ARGB,
+            attrs,
+            &pixelBuffer
+        )
+        
+        if let pixelBuffer = pixelBuffer {
+            logger.debug("✅ Pixel buffer created successfully")
+            
+            // Write frames
+            let frameDuration = CMTimeMake(value: 1, timescale: 1)
+            
+            videoInput.requestMediaDataWhenReady(on: .main) {
+                self.logger.debug("📝 Writing video frame")
+                adaptor.append(pixelBuffer, withPresentationTime: .zero)
+                videoInput.markAsFinished()
+                
+                assetWriter.finishWriting {
+                    self.logger.debug("✅ Video writing completed")
+                }
+            }
+            
+            // Wait for completion
+            while assetWriter.status == .writing {
+                await Task.sleep(100_000_000) // 0.1 second
+            }
+            
+            if assetWriter.status == .completed {
+                logger.debug("🎉 Video creation successful")
+                return ProcessingResult(
+                    outputURL: outputURL,
+                    originalFileName: metadata.originalFileName ?? "video",
+                    suggestedFileName: "converted_video.mp4",
+                    fileType: format,
+                    metadata: nil
+                )
+            }
+        }
+        
+        logger.error("❌ Failed to create video")
+        throw ConversionError.conversionFailed(reason: "Failed to create video from image")
+    }
 }

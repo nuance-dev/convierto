@@ -101,34 +101,52 @@ class FileProcessor: ObservableObject {
     
     func processFile(_ url: URL, outputFormat: UTType, metadata: ConversionMetadata) async throws -> ProcessingResult {
         logger.debug("🔄 Starting file processing pipeline")
+        logger.debug("📂 Input file: \(url.path)")
+        logger.debug("🎯 Target format: \(outputFormat.identifier)")
         
         currentStage = .analyzing
         
         do {
+            logger.debug("🔍 Step 1: Validating input type")
             let inputType = try await validateInput(url)
+            logger.debug("✅ Input type validated: \(inputType.identifier)")
+            
+            logger.debug("🔍 Step 2: Checking format compatibility")
             try await validateCompatibility(input: inputType, output: outputFormat)
+            logger.debug("✅ Format compatibility validated")
             
             currentStage = .converting
+            logger.debug("⚙️ Current stage: Converting")
             
-            // Direct processing based on type instead of using coordinator
             switch (inputType, outputFormat) {
                 case (let input, let output) where input.conforms(to: .image) && output.conforms(to: .image):
+                    logger.debug("🎨 Processing image to image conversion")
                     let imageProcessor = ImageProcessor()
-                    let result = try await imageProcessor.processImage(
+                    return try await imageProcessor.convert(
                         url,
                         to: outputFormat,
                         metadata: metadata,
                         progress: progress
                     )
-                    currentStage = .completed
-                    return result
+                    
+                case (let input, let output) where input.conforms(to: .image) && output.conforms(to: .movie):
+                    logger.debug("🎬 Processing image to video conversion")
+                    let videoProcessor = VideoProcessor()
+                    return try await videoProcessor.convert(
+                        url,
+                        to: outputFormat,
+                        metadata: metadata,
+                        progress: progress
+                    )
                     
                 default:
+                    logger.error("❌ Unsupported conversion combination: \(inputType.identifier) -> \(outputFormat.identifier)")
                     throw ConversionError.conversionNotPossible(reason: "Unsupported conversion type")
             }
             
         } catch {
             currentStage = .failed
+            logger.error("❌ Conversion failed: \(error.localizedDescription)")
             self.error = error as? ConversionError ?? ConversionError.conversionFailed(reason: error.localizedDescription)
             throw self.error!
         }

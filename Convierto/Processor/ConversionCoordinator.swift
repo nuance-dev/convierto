@@ -128,11 +128,22 @@ class ConversionCoordinator: NSObject {
         
         logger.debug("✅ Input type determined: \(inputType.identifier)")
         
+        // Handle different conversion types with detailed logging
         if inputType.conforms(to: .image) && outputFormat.conforms(to: .image) {
+            logger.debug("🎨 Initiating image-to-image conversion")
             let imageProcessor = ImageProcessor()
+            logger.debug("✅ Image processor created")
             return try await imageProcessor.processImage(url, to: outputFormat, metadata: metadata, progress: progress)
+        } else if inputType.conforms(to: .image) && outputFormat.conforms(to: .movie) {
+            logger.debug("🎬 Initiating image-to-video conversion")
+            let videoProcessor = VideoProcessor()
+            logger.debug("✅ Video processor created")
+            return try await videoProcessor.createVideoFromImage(url, to: outputFormat, metadata: metadata, progress: progress)
         }
         
+        logger.error("❌ Unsupported conversion combination")
+        logger.debug("📄 Input type: \(inputType.identifier)")
+        logger.debug("🎯 Output type: \(outputFormat.identifier)")
         throw ConversionError.conversionNotPossible(reason: "Unsupported conversion type")
     }
 } 
