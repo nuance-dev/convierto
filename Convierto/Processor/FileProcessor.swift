@@ -119,6 +119,18 @@ class FileProcessor: ObservableObject {
         logger.debug("🎯 Target format: \(outputFormat.identifier)")
         
         currentStage = .analyzing
+        conversionProgress = 0
+        
+        // Setup progress observation
+        let progressObserver = progress.observe(\.fractionCompleted) { [weak self] _, _ in
+            Task { @MainActor in
+                self?.conversionProgress = self?.progress.fractionCompleted ?? 0
+            }
+        }
+        
+        defer {
+            progressObserver.invalidate()
+        }
         
         do {
             logger.debug("🔍 Step 1: Validating input type")
@@ -212,12 +224,10 @@ class FileProcessor: ObservableObject {
                 case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .movie):
                     logger.debug("🎵 Processing audio visualization to video")
                     let audioProcessor = AudioProcessor()
-                    let asset = AVURLAsset(url: url)
-                    let outputURL = try await CacheManager.shared.createTemporaryURL(for: output.preferredFilenameExtension ?? "mp4")
+                    let outputURL = try await CacheManager.shared.createTemporaryURL(for: "mp4")
                     return try await audioProcessor.convert(
-                        asset,
-                        to: outputURL,
-                        format: output,
+                        url,
+                        to: outputFormat,
                         metadata: metadata,
                         progress: progress
                     )
@@ -228,7 +238,7 @@ class FileProcessor: ObservableObject {
                     let asset = AVURLAsset(url: url)
                     return try await audioProcessor.createWaveformImage(
                         from: asset,
-                        to: output,
+                        to: outputFormat,
                         metadata: metadata,
                         progress: progress
                     )
@@ -298,37 +308,32 @@ class FileProcessor: ObservableObject {
     }
     
     private func validateCompatibility(input: UTType, output: UTType) async throws {
-        logger.debug("Validating compatibility from \(input.identifier) to \(output.identifier)")
+        logger.debug("🔍 Validating format compatibility")
+        logger.debug("📄 Input: \(input.identifier)")
+        logger.debug("🎯 Output: \(output.identifier)")
         
-        // Check basic compatibility
-        if input == output {
-            logger.debug("Same format conversion, skipping compatibility check")
-            return
-        }
-        
-        // Check for supported conversion paths
-        switch (input, output) {
-        case (let input, let output) where input.conforms(to: .image) && output.conforms(to: .image):
-            logger.debug("Image to image conversion validated")
-            return
+        // Validate audio to video conversion
+        if input.conforms(to: .audio) && output.conforms(to: .audiovisualContent) {
+            guard output == .mpeg4Movie else {
+                throw ConversionError.incompatibleFormats(
+                    from: input,
+                    to: output
+                )
+            }
             
-        case (let input, let output) where input.conforms(to: .image) && output.conforms(to: .movie):
-            logger.debug("Checking resources for image to video conversion")
-            let requiredMemory: UInt64 = 500_000_000 // 500MB
+            // Check memory requirements
+            let requiredMemory: UInt64 = 750_000_000 // 750MB for audio visualization
             let available = await ResourcePool.shared.getAvailableMemory()
+            
             guard available >= requiredMemory else {
-                logger.error("Insufficient memory: required \(requiredMemory), available \(available)")
                 throw ConversionError.insufficientMemory(
                     required: requiredMemory,
                     available: available
                 )
             }
-            logger.debug("Resource check passed for image to video conversion")
-            
-        default:
-            logger.error("Incompatible formats: \(input.identifier) to \(output.identifier)")
-            throw ConversionError.incompatibleFormats(from: input, to: output)
         }
+        
+        logger.debug("✅ Format compatibility validated")
     }
     
     private func determineConversionStrategy(input: UTType, output: UTType) -> ConversionStrategy {

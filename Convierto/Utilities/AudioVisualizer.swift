@@ -24,26 +24,61 @@ class AudioVisualizer {
     
     func generateVisualizationFrames(
         for asset: AVAsset,
-        frameCount: Int
+        frameCount: Int? = nil,
+        progressHandler: ((Double) -> Void)? = nil
     ) async throws -> [CGImage] {
         logger.debug("Generating visualization frames")
-        var frames: [CGImage] = []
-        let duration = try await asset.load(.duration)
-        let timeStep = duration.seconds / Double(frameCount)
         
-        for frameIndex in 0..<frameCount {
-            let time = CMTime(seconds: Double(frameIndex) * timeStep, preferredTimescale: 600)
-            let samples = try await extractAudioSamples(from: asset, at: time, windowSize: timeStep)
+        let duration = try await asset.load(.duration)
+        let actualFrameCount = frameCount ?? min(
+            Int(duration.seconds * 30), // 30 fps
+            1800 // Max 60 seconds
+        )
+        
+        logger.debug("Generating \(actualFrameCount) frames for \(duration.seconds) seconds")
+        
+        let batchSize = 15
+        var frames: [CGImage] = []
+        frames.reserveCapacity(actualFrameCount)
+        
+        for batchStart in stride(from: 0, to: actualFrameCount, by: batchSize) {
+            if Task.isCancelled { break }
             
-            if let frame = try await generateVisualizationFrame(from: samples) {
-                frames.append(frame)
+            let batchEnd = min(batchStart + batchSize, actualFrameCount)
+            let timeStep = duration.seconds / Double(actualFrameCount)
+            
+            for frameIndex in batchStart..<batchEnd {
+                let progress = Double(frameIndex) / Double(actualFrameCount)
+                progressHandler?(progress)
+                
+                let time = CMTime(seconds: Double(frameIndex) * timeStep, preferredTimescale: 600)
+                
+                do {
+                    let samples = try await extractAudioSamples(from: asset, at: time, windowSize: timeStep)
+                    if let frame = try await generateVisualizationFrame(from: samples) {
+                        autoreleasepool {
+                            frames.append(frame)
+                        }
+                    }
+                    
+                    logger.debug("Generated frame \(frameIndex)/\(actualFrameCount)")
+                } catch {
+                    logger.error("Failed to generate frame \(frameIndex): \(error.localizedDescription)")
+                    continue
+                }
             }
             
-            if frameIndex % 10 == 0 {
-                logger.debug("Generated frame \(frameIndex)/\(frameCount)")
+            if batchStart % (batchSize * 4) == 0 {
+                logger.debug("🧹 Performing memory cleanup")
+                autoreleasepool { }
             }
         }
         
+        if frames.isEmpty {
+            throw ConversionError.conversionFailed(reason: "No frames were generated")
+        }
+        
+        progressHandler?(1.0)
         return frames
     }
     
@@ -55,7 +90,7 @@ class AudioVisualizer {
         let reader = try AVAssetReader(asset: asset)
         let outputSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
-            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMBitDepthKey: 32,
             AVLinearPCMIsFloatKey: true,
             AVLinearPCMIsBigEndianKey: false,
             AVSampleRateKey: 44100
@@ -219,16 +254,23 @@ class AudioVisualizer {
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: Int(size.width),
-            AVVideoHeightKey: Int(size.height)
+            AVVideoHeightKey: Int(size.height),
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: 10_000_000,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+            ]
         ]
         
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        input.expectsMediaDataInRealTime = true
         writer.add(input)
         
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: input,
             sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB)
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB),
+                kCVPixelBufferWidthKey as String: Int(size.width),
+                kCVPixelBufferHeightKey as String: Int(size.height)
             ]
         )
         
@@ -238,14 +280,37 @@ class AudioVisualizer {
         let frameDuration = CMTime(value: duration.value / Int64(frames.count), timescale: duration.timescale)
         
         for (index, frame) in frames.enumerated() {
+            // Wait until the input is ready for more data
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 10_000_000) // 10ms delay
+                
+                // Check for writer failures
+                if writer.status == .failed {
+                    throw ConversionError.conversionFailed(reason: "Writer failed: \(String(describing: writer.error))")
+                }
+                
+                // Check for cancellation
+                try Task.checkCancellation()
+            }
+            
             if let buffer = try await createPixelBuffer(from: frame) {
                 let presentationTime = CMTime(value: Int64(index) * frameDuration.value, timescale: frameDuration.timescale)
-                adaptor.append(buffer, withPresentationTime: presentationTime)
+                
+                // Ensure we're on the main thread for UI updates
+                await MainActor.run {
+                    adaptor.append(buffer, withPresentationTime: presentationTime)
+                }
             }
         }
         
+        // Mark completion and wait for writing to finish
         input.markAsFinished()
         await writer.finishWriting()
+        
+        // Verify the writer completed successfully
+        if writer.status != .completed {
+            throw ConversionError.conversionFailed(reason: "Failed to finish writing: \(String(describing: writer.error))")
+        }
         
         let asset = AVAsset(url: frameURL)
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
@@ -342,5 +407,74 @@ class AudioVisualizer {
         }
         
         return frames
+    }
+    
+    private func createVisualizationFrame(from samples: [Float], at time: Double) async throws -> CGImage {
+        let context = CGContext(
+            data: nil,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )
+        
+        guard let context else {
+            throw ConversionError.conversionFailed(reason: "Failed to create graphics context")
+        }
+        
+        // Clear background
+        context.setFillColor(NSColor.black.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+        
+        // Use dynamic batch size based on available memory
+        let batchSize = min(samples.count, 1024)
+        let samplesPerBatch = samples.count / batchSize
+        
+        for batchIndex in 0..<batchSize {
+            autoreleasepool {
+                let startIndex = batchIndex * samplesPerBatch
+                let endIndex = min(startIndex + samplesPerBatch, samples.count)
+                let batchSamples = Array(samples[startIndex..<endIndex])
+                
+                drawWaveformBatch(
+                    context: context,
+                    samples: batchSamples,
+                    startX: CGFloat(batchIndex) * size.width / CGFloat(batchSize)
+                )
+            }
+        }
+        
+        guard let image = context.makeImage() else {
+            throw ConversionError.conversionFailed(reason: "Failed to create visualization frame")
+        }
+        
+        return image
+    }
+    
+    private func drawWaveformBatch(
+        context: CGContext,
+        samples: [Float],
+        startX: CGFloat
+    ) {
+        let width = size.width / CGFloat(samples.count)
+        let midY = size.height / 2
+        
+        context.setLineWidth(2.0)
+        context.setStrokeColor(colorPalette[0])
+        
+        for (index, sample) in samples.enumerated() {
+            let x = startX + CGFloat(index) * width
+            let amplitude = CGFloat(abs(sample))
+            let height = amplitude * size.height * 0.8
+            
+            let path = CGMutablePath()
+            path.move(to: CGPoint(x: x, y: midY - height/2))
+            path.addLine(to: CGPoint(x: x, y: midY + height/2))
+            
+            context.addPath(path)
+            context.strokePath()
+        }
     }
 }

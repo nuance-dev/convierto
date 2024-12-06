@@ -13,22 +13,22 @@ class AudioProcessor: BaseConverter {
     private let visualizer: AudioVisualizer
     private let imageProcessor: ImageProcessor
     private let resourcePool: ResourcePool
+    private let progressTracker: ProgressTracker
     private let maxBufferSize: Int = 1024 * 1024 // 1MB buffer size
     
     required init(settings: ConversionSettings = ConversionSettings()) {
         self.resourcePool = ResourcePool.shared
         self.visualizer = AudioVisualizer(size: CGSize(width: 1920, height: 1080))
         self.imageProcessor = ImageProcessor(settings: settings)
+        self.progressTracker = ProgressTracker()
         super.init(settings: settings)
     }
     
     override func canConvert(from: UTType, to: UTType) -> Bool {
         switch (from, to) {
         case (let f, _) where f.conforms(to: .audio):
-            return to.conforms(to: .audio) || 
-                   to.conforms(to: .audiovisualContent) || 
-                   to.conforms(to: .image)
-        case (_, let t) where t.conforms(to: .audiovisualContent):
+            return true
+        case (_, let t) where t.conforms(to: .image) || t.conforms(to: .audiovisualContent):
             return true
         default:
             return false
@@ -212,143 +212,57 @@ class AudioProcessor: BaseConverter {
         metadata: ConversionMetadata,
         progress: Progress
     ) async throws -> ProcessingResult {
-        logger.debug("🎨 Creating audio visualization")
+        let videoFormat = UTType.mpeg4Movie
+        
+        logger.debug("🎨 Creating audio visualization with format: \(videoFormat.identifier)")
+        
+        // Configure progress tracking
+        progress.totalUnitCount = 100
+        progress.completedUnitCount = 0
         
         let duration = try await asset.load(.duration)
-        let samples = try await extractAudioSamples(
-            from: asset,
-            at: .zero,
-            windowSize: duration.seconds
-        )
+        let fps = 30
+        let totalFrames = min(Int(duration.seconds * Double(fps)), 1800)
         
-        let frameCount = Int(duration.seconds * 30) // 30 fps
+        logger.debug("⚙️ Generating \(totalFrames) frames for \(duration.seconds) seconds")
+        
+        // Generate frames with progress tracking
         let frames = try await visualizer.generateVisualizationFrames(
-            from: samples,
-            duration: duration.seconds,
-            frameCount: frameCount
-        )
-        
-        // Create video writer
-        let videoWriter = try AVAssetWriter(url: outputURL, fileType: .mp4)
-        logger.debug("✅ Created video writer")
-        
-        // Configure video settings
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: 1920,
-            AVVideoHeightKey: 1080,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 10_000_000,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
-            ]
-        ]
-        
-        // Create video input
-        let videoInput = AVAssetWriterInput(
-            mediaType: .video,
-            outputSettings: videoSettings
-        )
-        videoInput.expectsMediaDataInRealTime = false
-        
-        // Create audio input from original asset
-        let audioSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 44100,
-            AVNumberOfChannelsKey: 2,
-            AVEncoderBitRateKey: 128000
-        ]
-        
-        let audioInput = AVAssetWriterInput(
-            mediaType: .audio,
-            outputSettings: audioSettings
-        )
-        audioInput.expectsMediaDataInRealTime = false
-        
-        // Add inputs to writer
-        videoWriter.add(videoInput)
-        videoWriter.add(audioInput)
-        
-        // Start writing session
-        if !videoWriter.startWriting() {
-            throw ConversionError.conversionFailed(reason: "Failed to start writing")
-        }
-        
-        videoWriter.startSession(atSourceTime: .zero)
-        
-        // Write video frames
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let queue = DispatchQueue(label: "com.convierto.videowriting")
-            videoInput.requestMediaDataWhenReady(on: queue) {
-                var frameIndex = 0
-                while videoInput.isReadyForMoreMediaData && frameIndex < frames.count {
-                    autoreleasepool {
-                        let frame = frames[frameIndex]
-                        if let pixelBuffer = try? self.visualizer.createPixelBuffer(from: frame) {
-                            let presentationTime = CMTime(value: Int64(frameIndex), timescale: 30)
-                            
-                            var timingInfo = CMSampleTimingInfo(
-                                duration: CMTime(value: 1, timescale: 30),
-                                presentationTimeStamp: presentationTime,
-                                decodeTimeStamp: .invalid
-                            )
-                            
-                            var videoInfo: CMVideoFormatDescription?
-                            CMVideoFormatDescriptionCreateForImageBuffer(
-                                allocator: kCFAllocatorDefault,
-                                imageBuffer: pixelBuffer,
-                                formatDescriptionOut: &videoInfo
-                            )
-                            
-                            if let videoInfo = videoInfo {
-                                var sampleBuffer: CMSampleBuffer?
-                                CMSampleBufferCreateForImageBuffer(
-                                    allocator: kCFAllocatorDefault,
-                                    imageBuffer: pixelBuffer,
-                                    dataReady: true,
-                                    makeDataReadyCallback: nil,
-                                    refcon: nil,
-                                    formatDescription: videoInfo,
-                                    sampleTiming: &timingInfo,
-                                    sampleBufferOut: &sampleBuffer
-                                )
-                                
-                                if let sampleBuffer = sampleBuffer,
-                                   !videoInput.append(sampleBuffer) {
-                                    continuation.resume(throwing: ConversionError.conversionFailed(reason: "Failed to append video frame"))
-                                    return
-                                }
-                            }
-                        }
-                        frameIndex += 1
-                        progress.completedUnitCount = Int64((Double(frameIndex) / Double(frames.count)) * 100)
-                    }
-                }
-                
-                videoInput.markAsFinished()
-                continuation.resume()
+            for: asset,
+            frameCount: totalFrames
+        ) { [weak self] frameProgress in
+            progress.completedUnitCount = Int64(frameProgress * 50)
+            
+            Task { @MainActor in
+                self?.progressTracker.updateProgress(for: "visualization", progress: frameProgress)
+                self?.progressTracker.setStage(.processing, message: "Generating visualization frames...")
             }
         }
         
-        // Copy audio from original asset
-        try await copyAudioTrack(from: asset, to: audioInput)
-        audioInput.markAsFinished()
+        progress.completedUnitCount = 50
         
-        // Finish writing
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            videoWriter.finishWriting {
-                if let error = videoWriter.error {
-                    continuation.resume(throwing: ConversionError.conversionFailed(reason: error.localizedDescription))
-                } else {
-                    continuation.resume()
-                }
-            }
+        await MainActor.run {
+            progressTracker.setStage(.optimizing, message: "Creating video track...")
+        }
+        
+        // Create video track
+        let videoTrack = try await visualizer.createVideoTrack(
+            from: frames,
+            duration: duration,
+            settings: settings
+        )
+        
+        progress.completedUnitCount = 75
+        
+        await MainActor.run {
+            progressTracker.setStage(.exporting, message: "Finalizing video...")
         }
         
         return ProcessingResult(
             outputURL: outputURL,
             originalFileName: metadata.originalFileName ?? "audio_visualization",
-            suggestedFileName: "visualized_audio." + (format.preferredFilenameExtension ?? "mp4"),
-            fileType: format,
+            suggestedFileName: "visualized_audio.mp4",
+            fileType: videoFormat,
             metadata: metadata.toDictionary()
         )
     }

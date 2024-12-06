@@ -5,7 +5,7 @@ enum ConversionError: LocalizedError {
     case invalidInput
     case conversionFailed(reason: String)
     case exportFailed(reason: String)
-    case incompatibleFormats(from: UTType, to: UTType)
+    case incompatibleFormats(from: UTType, to: UTType, reason: String? = nil)
     case unsupportedFormat(format: UTType)
     case insufficientMemory(required: UInt64, available: UInt64)
     case insufficientDiskSpace(required: UInt64, available: UInt64)
@@ -28,8 +28,8 @@ enum ConversionError: LocalizedError {
             return "Conversion failed: \(reason)"
         case .exportFailed(let reason):
             return "Export failed: \(reason)"
-        case .incompatibleFormats(let from, let to):
-            return "Cannot convert from \(from.localizedDescription ?? "unknown") to \(to.localizedDescription ?? "unknown")"
+        case .incompatibleFormats(let from, let to, let reason):
+            return "Cannot convert from \(from.localizedDescription ?? "unknown") to \(to.localizedDescription ?? "unknown"). Reason: \(reason ?? "unknown")"
         case .unsupportedFormat(let format):
             return "Unsupported format: \(format.localizedDescription ?? "unknown")"
         case .insufficientMemory(let required, let available):
