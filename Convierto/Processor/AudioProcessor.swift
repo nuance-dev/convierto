@@ -28,7 +28,7 @@ class AudioProcessor: BaseConverter {
             return to.conforms(to: .audio) || 
                    to.conforms(to: .audiovisualContent) || 
                    to.conforms(to: .image)
-        case (let f, let t) where f.conforms(to: .audiovisualContent):
+        case (_, let t) where t.conforms(to: .audiovisualContent):
             return true
         default:
             return false
@@ -298,7 +298,7 @@ class AudioProcessor: BaseConverter {
         )
     }
     
-    private func createWaveformImage(
+    func createWaveformImage(
         from asset: AVAsset,
         to outputURL: URL,
         format: UTType,
@@ -307,7 +307,11 @@ class AudioProcessor: BaseConverter {
     ) async throws -> ProcessingResult {
         logger.debug("Creating waveform image")
         
-        let waveformImage = try await visualizer.generateWaveformImage(for: asset, size: visualizer.size)
+        let waveformImage = try await visualizer.generateWaveformImage(
+            for: asset,
+            size: visualizer.size
+        )
+        
         let nsImage = NSImage(cgImage: waveformImage, size: visualizer.size)
         
         try await imageProcessor.saveImage(
@@ -319,7 +323,7 @@ class AudioProcessor: BaseConverter {
         
         return ProcessingResult(
             outputURL: outputURL,
-            originalFileName: "waveform",
+            originalFileName: metadata.originalFileName ?? "waveform",
             suggestedFileName: "waveform." + (format.preferredFilenameExtension ?? "png"),
             fileType: format,
             metadata: metadata.toDictionary()
@@ -342,5 +346,44 @@ class AudioProcessor: BaseConverter {
         }
         
         throw ConversionError.incompatibleFormats(from: inputType, to: outputType)
+    }
+    
+    func convert(
+        _ asset: AVAsset,
+        to outputURL: URL,
+        format: UTType,
+        metadata: ConversionMetadata,
+        progress: Progress
+    ) async throws -> ProcessingResult {
+        logger.debug("🎵 Starting audio conversion")
+        
+        guard let exportSession = try await createExportSession(
+            for: asset,
+            outputFormat: format,
+            isAudioOnly: true
+        ) else {
+            throw ConversionError.exportFailed(reason: "Failed to create export session")
+        }
+        
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = getAVFileType(for: format)
+        
+        if let audioMix = try await createAudioMix(for: asset) {
+            exportSession.audioMix = audioMix
+        }
+        
+        await exportSession.export()
+        
+        guard exportSession.status == .completed else {
+            throw ConversionError.exportFailed(reason: "Export failed: \(String(describing: exportSession.error))")
+        }
+        
+        return ProcessingResult(
+            outputURL: outputURL,
+            originalFileName: metadata.originalFileName ?? "audio",
+            suggestedFileName: "converted_audio." + (format.preferredFilenameExtension ?? "m4a"),
+            fileType: format,
+            metadata: metadata.toDictionary()
+        )
     }
 }

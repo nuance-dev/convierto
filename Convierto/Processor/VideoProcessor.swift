@@ -104,76 +104,78 @@ class VideoProcessor: BaseConverter {
         }
         logger.debug("✅ Created export session")
         
-        exportSession.outputURL = outputURL
-        exportSession.outputFileType = getAVFileType(for: format)
-        logger.debug("⚙️ Configured export session with type: \(String(describing: exportSession.outputFileType?.rawValue))")
-        
-        if let audioMix = try await createAudioMix(for: asset) {
-            exportSession.audioMix = audioMix
-            logger.debug("🎵 Applied audio mix")
-        }
-        
-        if format.conforms(to: .audiovisualContent) {
-            let videoComposition = try await createVideoComposition(for: asset)
-            exportSession.videoComposition = videoComposition
-            logger.debug("🎥 Applied video composition")
-        }
-        
-        logger.debug("▶️ Starting export")
-        let progressTask = Task {
-            while !Task.isCancelled {
-                let currentProgress = exportSession.progress
-                progress.completedUnitCount = Int64(currentProgress * 100)
-                logger.debug("📊 Export progress: \(Int(currentProgress * 100))%")
-                try? await Task.sleep(nanoseconds: 100_000_000)
-                if exportSession.status == .completed || exportSession.status == .failed {
-                    break
-                }
-            }
-        }
-        
-        try await withCheckedThrowingContinuation { continuation in
-            exportSession.exportAsynchronously {
-                if exportSession.status == .completed {
-                    continuation.resume()
-                } else if let error = exportSession.error {
+        // Make exportSession Sendable by isolating it
+        return try await withCheckedThrowingContinuation { continuation in
+            Task {
+                do {
+                    exportSession.outputURL = outputURL
+                    exportSession.outputFileType = getAVFileType(for: format)
+                    logger.debug("⚙️ Configured export session with type: \(String(describing: exportSession.outputFileType?.rawValue))")
+                    
+                    if let audioMix = try await createAudioMix(for: asset) {
+                        exportSession.audioMix = audioMix
+                        logger.debug("🎵 Applied audio mix")
+                    }
+                    
+                    if format.conforms(to: .audiovisualContent) {
+                        let videoComposition = try await createVideoComposition(for: asset)
+                        exportSession.videoComposition = videoComposition
+                        logger.debug("🎥 Applied video composition")
+                    }
+                    
+                    logger.debug("▶️ Starting export")
+                    
+                    // Create progress tracking task
+                    let progressTask = Task {
+                        while !Task.isCancelled {
+                            let currentProgress = exportSession.progress
+                            progress.completedUnitCount = Int64(currentProgress * 100)
+                            logger.debug("📊 Export progress: \(Int(currentProgress * 100))%")
+                            try? await Task.sleep(nanoseconds: 100_000_000)
+                            if exportSession.status == .completed || exportSession.status == .failed {
+                                break
+                            }
+                        }
+                    }
+                    
+                    // Start export
+                    await exportSession.export()
+                    progressTask.cancel()
+                    
+                    if exportSession.status == .completed {
+                        logger.debug("✅ Export completed successfully")
+                        let result = ProcessingResult(
+                            outputURL: outputURL,
+                            originalFileName: metadata.originalFileName ?? originalURL.lastPathComponent,
+                            suggestedFileName: "converted_video." + (format.preferredFilenameExtension ?? "mp4"),
+                            fileType: format,
+                            metadata: try await extractMetadata(from: asset)
+                        )
+                        continuation.resume(returning: result)
+                    } else if let error = exportSession.error {
+                        logger.error("❌ Export failed: \(error.localizedDescription)")
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(throwing: ConversionError.conversionFailed(reason: "Export failed"))
+                    }
+                } catch {
                     continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(throwing: ConversionError.conversionFailed(reason: "Export failed"))
                 }
             }
         }
-        
-        progressTask.cancel()
-        logger.debug("⏹️ Export completed with status: \(exportSession.status.rawValue)")
-        
-        guard exportSession.status == .completed else {
-            if let error = exportSession.error {
-                logger.error("❌ Export failed: \(error.localizedDescription)")
-            }
-            throw exportSession.error ?? ConversionError.conversionFailed(reason: "Export failed")
-        }
-        
-        logger.debug("✅ Conversion successful")
-        return ProcessingResult(
-            outputURL: outputURL,
-            originalFileName: metadata.originalFileName ?? originalURL.lastPathComponent,
-            suggestedFileName: "converted_video." + (format.preferredFilenameExtension ?? "mp4"),
-            fileType: format,
-            metadata: try await extractMetadata(from: asset)
-        )
     }
     
-    private func extractKeyFrame(from asset: AVAsset, format: UTType, metadata: ConversionMetadata) async throws -> ProcessingResult {
+    func extractKeyFrame(from asset: AVAsset, format: UTType, metadata: ConversionMetadata) async throws -> ProcessingResult {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         
         let time = CMTime(seconds: 0, preferredTimescale: 600)
         let imageRef = try await generator.image(at: time).image
         
-        let outputURL = try await CacheManager.shared.createTemporaryFile(withExtension: format.preferredFilenameExtension ?? "jpg")
+        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
         let nsImage = NSImage(cgImage: imageRef, size: NSSize(width: imageRef.width, height: imageRef.height))
         
+        let imageProcessor = ImageProcessor()
         try await imageProcessor.saveImage(
             nsImage,
             format: format,
@@ -270,101 +272,118 @@ class VideoProcessor: BaseConverter {
         return metadata
     }
     
-    func createVideoFromImage(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
-        logger.debug("🎬 Starting image to video conversion")
-        logger.debug("📂 Source image: \(url.path)")
-        logger.debug("🎯 Target format: \(format.identifier)")
+    private func createVideoFromImage(_ image: NSImage, format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+        logger.debug("🎬 Creating video from image")
         
-        // Create temporary URL for output
         let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
         logger.debug("📝 Output URL created: \(outputURL.path)")
         
-        // Load source image
-        guard let image = NSImage(contentsOf: url) else {
-            logger.error("❌ Failed to load source image")
-            throw ConversionError.invalidInput
-        }
-        logger.debug("✅ Source image loaded successfully")
+        let videoWriter = try AVAssetWriter(url: outputURL, fileType: .mp4)
+        logger.debug("✅ Created AVAssetWriter")
         
-        // Create video settings
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: image.size.width,
-            AVVideoHeightKey: image.size.height
+            AVVideoWidthKey: Int(image.size.width),
+            AVVideoHeightKey: Int(image.size.height),
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: 10_000_000,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+            ]
         ]
         logger.debug("⚙️ Video settings configured: \(videoSettings)")
         
-        // Create AVAssetWriter
-        guard let assetWriter = try? AVAssetWriter(url: outputURL, fileType: .mp4) else {
-            logger.error("❌ Failed to create asset writer")
-            throw ConversionError.conversionFailed(reason: "Failed to create video writer")
-        }
-        
-        // Add video input
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: videoInput,
-            sourcePixelBufferAttributes: nil
-        )
-        
-        assetWriter.add(videoInput)
+        videoInput.expectsMediaDataInRealTime = true
         logger.debug("✅ Video input configured")
         
-        // Start writing session
-        assetWriter.startWriting()
-        assetWriter.startSession(atSourceTime: .zero)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB),
+                kCVPixelBufferWidthKey as String: Int(image.size.width),
+                kCVPixelBufferHeightKey as String: Int(image.size.height)
+            ]
+        )
+        logger.debug("✅ Pixel buffer adaptor configured")
+        
+        videoWriter.add(videoInput)
+        videoWriter.startWriting()
+        videoWriter.startSession(atSourceTime: .zero)
         logger.debug("🎬 Started writing session")
         
-        // Create pixel buffer
+        // Create a 3-second video
+        let frameDuration = CMTimeMake(value: 1, timescale: 30)
+        let frameCount = 90 // 3 seconds at 30fps
+        logger.debug("⚙️ Configured for \(frameCount) frames at \(30)fps")
+        
+        for frameIndex in 0..<frameCount {
+            if let buffer = try await createPixelBuffer(from: image) {
+                logger.debug("✅ Pixel buffer created successfully")
+                let presentationTime = CMTimeMultiply(frameDuration, multiplier: Int32(frameIndex))
+                adaptor.append(buffer, withPresentationTime: presentationTime)
+                logger.debug("📝 Writing video frame \(frameIndex + 1)/\(frameCount)")
+            }
+        }
+        
+        videoInput.markAsFinished()
+        await videoWriter.finishWriting()
+        logger.debug("✅ Video writing completed")
+        
+        return ProcessingResult(
+            outputURL: outputURL,
+            originalFileName: metadata.originalFileName ?? "image",
+            suggestedFileName: "converted_video.mp4",
+            fileType: format,
+            metadata: nil
+        )
+    }
+    
+    private func createPixelBuffer(from image: NSImage) async throws -> CVPixelBuffer? {
         var pixelBuffer: CVPixelBuffer?
+        let width = Int(image.size.width)
+        let height = Int(image.size.height)
+        
         let attrs = [
             kCVPixelBufferCGImageCompatibilityKey: kCFBooleanTrue,
             kCVPixelBufferCGBitmapContextCompatibilityKey: kCFBooleanTrue
         ] as CFDictionary
         
-        CVPixelBufferCreate(
+        let status = CVPixelBufferCreate(
             kCFAllocatorDefault,
-            Int(image.size.width),
-            Int(image.size.height),
+            width,
+            height,
             kCVPixelFormatType_32ARGB,
             attrs,
             &pixelBuffer
         )
         
-        if let pixelBuffer = pixelBuffer {
-            logger.debug("✅ Pixel buffer created successfully")
-            
-            // Write frames
-            let frameDuration = CMTimeMake(value: 1, timescale: 1)
-            
-            videoInput.requestMediaDataWhenReady(on: .main) {
-                self.logger.debug("📝 Writing video frame")
-                adaptor.append(pixelBuffer, withPresentationTime: .zero)
-                videoInput.markAsFinished()
-                
-                assetWriter.finishWriting {
-                    self.logger.debug("✅ Video writing completed")
-                }
-            }
-            
-            // Wait for completion
-            while assetWriter.status == .writing {
-                await Task.sleep(100_000_000) // 0.1 second
-            }
-            
-            if assetWriter.status == .completed {
-                logger.debug("🎉 Video creation successful")
-                return ProcessingResult(
-                    outputURL: outputURL,
-                    originalFileName: metadata.originalFileName ?? "video",
-                    suggestedFileName: "converted_video.mp4",
-                    fileType: format,
-                    metadata: nil
-                )
-            }
+        guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
+            logger.error("❌ Failed to create pixel buffer")
+            return nil
         }
         
-        logger.error("❌ Failed to create video")
-        throw ConversionError.conversionFailed(reason: "Failed to create video from image")
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        
+        guard let context = CGContext(
+            data: CVPixelBufferGetBaseAddress(buffer),
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+        ) else {
+            logger.error("❌ Failed to create CGContext")
+            return nil
+        }
+        
+        NSGraphicsContext.saveGraphicsState()
+        let nsContext = NSGraphicsContext(cgContext: context, flipped: false)
+        NSGraphicsContext.current = nsContext
+        image.draw(in: CGRect(x: 0, y: 0, width: width, height: height))
+        NSGraphicsContext.restoreGraphicsState()
+        
+        return buffer
     }
 }

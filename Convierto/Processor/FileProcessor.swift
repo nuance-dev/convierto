@@ -12,6 +12,7 @@ private let logger = Logger(
 
 struct ProcessingResult {
     let outputURL: URL
+    
     let originalFileName: String
     let suggestedFileName: String
     let fileType: UTType
@@ -132,6 +133,7 @@ class FileProcessor: ObservableObject {
             logger.debug("⚙️ Current stage: Converting")
             
             switch (inputType, outputFormat) {
+                // Image Conversions
                 case (let input, let output) where input.conforms(to: .image) && output.conforms(to: .image):
                     logger.debug("🎨 Processing image to image conversion")
                     let imageProcessor = ImageProcessor()
@@ -146,6 +148,108 @@ class FileProcessor: ObservableObject {
                     logger.debug("🎬 Processing image to video conversion")
                     let videoProcessor = VideoProcessor()
                     return try await videoProcessor.convert(
+                        url,
+                        to: outputFormat,
+                        metadata: metadata,
+                        progress: progress
+                    )
+                    
+                case (let input, let output) where input.conforms(to: .image) && output.conforms(to: .pdf):
+                    logger.debug("📄 Processing image to PDF conversion")
+                    let documentProcessor = DocumentProcessor()
+                    return try await documentProcessor.convert(
+                        url,
+                        to: outputFormat,
+                        metadata: metadata,
+                        progress: progress
+                    )
+                
+                // Video Conversions
+                case (let input, let output) where input.conforms(to: .movie) && output.conforms(to: .movie):
+                    logger.debug("🎬 Processing video format conversion")
+                    let videoProcessor = VideoProcessor()
+                    return try await videoProcessor.convert(
+                        url,
+                        to: outputFormat,
+                        metadata: metadata,
+                        progress: progress
+                    )
+                    
+                case (let input, let output) where input.conforms(to: .movie) && output.conforms(to: .image):
+                    logger.debug("📸 Processing video frame extraction")
+                    let videoProcessor = VideoProcessor()
+                    let asset = AVURLAsset(url: url)
+                    return try await videoProcessor.extractKeyFrame(
+                        from: asset,
+                        format: outputFormat,
+                        metadata: metadata
+                    )
+                    
+                case (let input, let output) where input.conforms(to: .movie) && output.conforms(to: .audio):
+    logger.debug("🎵 Processing video audio extraction")
+    let audioProcessor = AudioProcessor()
+    let asset = AVURLAsset(url: url)
+    let outputURL = try await CacheManager.shared.createTemporaryURL(for: output.preferredFilenameExtension ?? "m4a")
+    return try await audioProcessor.convert(
+        asset,
+        to: outputURL,
+        format: output,
+        metadata: metadata,
+        progress: progress
+    )
+                
+                // Audio Conversions
+                case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .audio):
+                    logger.debug("🎵 Processing audio format conversion")
+                    let audioProcessor = AudioProcessor()
+                    return try await audioProcessor.convert(
+                        url,
+                        to: outputFormat,
+                        metadata: metadata,
+                        progress: progress
+                    )
+                    
+                case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .movie):
+                    logger.debug("🎵 Processing audio visualization to video")
+                    let audioProcessor = AudioProcessor()
+                    let asset = AVURLAsset(url: url)
+                    let outputURL = try await CacheManager.shared.createTemporaryURL(for: output.preferredFilenameExtension ?? "mp4")
+                    return try await audioProcessor.convert(
+                        asset,
+                        to: outputURL,
+                        format: output,
+                        metadata: metadata,
+                        progress: progress
+                    )
+                    
+                case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .image):
+                    logger.debug("📊 Processing audio waveform generation")
+                    let audioProcessor = AudioProcessor()
+                    let asset = AVURLAsset(url: url)
+                    let outputURL = try await CacheManager.shared.createTemporaryURL(for: output.preferredFilenameExtension ?? "png")
+                    return try await audioProcessor.createWaveformImage(
+                        from: asset,
+                        to: outputURL,
+                        format: output,
+                        metadata: metadata,
+                        progress: progress
+                    )
+                
+                // PDF Conversions
+                case (let input, let output) where input.conforms(to: .pdf) && output.conforms(to: .image):
+                    logger.debug("🖼️ Processing PDF to image conversion")
+                    let documentProcessor = DocumentProcessor()
+                    return try await documentProcessor.convert(
+                        url,
+                        to: outputFormat,
+                        metadata: metadata,
+                        progress: progress
+                    )
+                    
+                case (let input, let output) where input.conforms(to: .pdf) && output.conforms(to: .movie):
+                    logger.debug("🎬 Processing PDF to video conversion")
+                    let documentProcessor = DocumentProcessor()
+                    return try await documentProcessor.convert(
                         url,
                         to: outputFormat,
                         metadata: metadata,
@@ -176,8 +280,8 @@ class FileProcessor: ObservableObject {
     }
     
     private func validateInput(_ url: URL) async throws -> UTType {
-        guard let resourceValues = try? url.resourceValues(forKeys: [.contentTypeKey]),
-              let contentType = resourceValues.contentType else {
+        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+        guard let contentType = resourceValues.contentType else {
             throw ConversionError.invalidInputType
         }
         
@@ -185,8 +289,7 @@ class FileProcessor: ObservableObject {
         guard FileManager.default.isReadableFile(atPath: url.path) else {
             throw ConversionError.fileAccessDenied(path: url.path)
         }
-        
-        // Validate file size
+
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         guard let fileSize = attributes[.size] as? UInt64,
               fileSize > 0 else {

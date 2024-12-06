@@ -1,6 +1,7 @@
 import Foundation
 import UniformTypeIdentifiers
 import os.log
+import AppKit
 
 class ConversionCoordinator: NSObject {
     private let queue = OperationQueue()
@@ -138,7 +139,20 @@ class ConversionCoordinator: NSObject {
             logger.debug("🎬 Initiating image-to-video conversion")
             let videoProcessor = VideoProcessor()
             logger.debug("✅ Video processor created")
-            return try await videoProcessor.createVideoFromImage(url, to: outputFormat, metadata: metadata, progress: progress)
+            
+            // Load image first
+            guard let image = NSImage(contentsOf: url) else {
+                logger.error("❌ Failed to load image from URL")
+                throw ConversionError.invalidInput
+            }
+            logger.debug("✅ Image loaded successfully")
+            
+            return try await videoProcessor.convert(
+                url,
+                to: outputFormat,
+                metadata: metadata,
+                progress: progress
+            )
         }
         
         logger.error("❌ Unsupported conversion combination")
