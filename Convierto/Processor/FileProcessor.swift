@@ -64,8 +64,8 @@ class FileProcessor: ObservableObject {
         setupProgressTracking()
     }
     
-    private func determineInputType(_ url: URL) async throws -> UTType {
-        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+    private func determineInputType(_ url: URL) throws -> UTType {
+        let resourceValues = try url.resourceValues(forKeys: [.contentTypeKey])
         guard let contentType = resourceValues.contentType else {
             throw ConversionError.invalidInputType
         }
@@ -303,5 +303,12 @@ class FileProcessor: ObservableObject {
             modificationDate: resourceValues.contentModificationDate,
             fileSize: Int64(resourceValues.fileSize ?? 0)
         )
+    }
+    
+    @MainActor
+    func cancelProcessing() {
+        currentStage = .idle
+        error = ConversionError.cancelled
+        conversionProgress = 0
     }
 }

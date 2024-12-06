@@ -3,6 +3,7 @@ import SwiftUI
 struct ProcessingView: View {
     @StateObject private var tracker = ProgressTracker()
     @State private var isAnimating = false
+    let onCancel: () -> Void
     
     var body: some View {
         VStack(spacing: 24) {
@@ -35,25 +36,21 @@ struct ProcessingView: View {
                     )
             }
             
-            VStack(spacing: 8) {
-                Text(getStageText())
-                    .font(.system(size: 16, weight: .medium))
-                
-                if !tracker.isIndeterminate {
-                    Text("\(Int(tracker.progress * 100))%")
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary)
-                }
-                
-                if !tracker.statusMessage.isEmpty {
-                    Text(tracker.statusMessage)
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                }
+            Button(action: onCancel) {
+                Text("Cancel")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.secondary)
             }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+            )
         }
         .onAppear {
-            withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
+            withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
                 isAnimating = true
             }
         }

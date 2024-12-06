@@ -59,8 +59,13 @@ class AudioProcessor: BaseConverter {
             let strategy = try determineConversionStrategy(from: asset, to: format)
             logger.debug("⚙️ Conversion strategy determined: \(String(describing: strategy))")
             
-            let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "m4a")
+            let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
             logger.debug("📝 Output URL created: \(outputURL.path)")
+            
+            // Check if task was cancelled
+            if Task.isCancelled {
+                throw ConversionError.cancelled
+            }
             
             return try await withTimeout(seconds: 300) {
                 logger.debug("⏳ Starting conversion with 300s timeout")

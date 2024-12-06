@@ -225,8 +225,14 @@ struct ContentView: View {
                     )
                     .transition(.opacity)
                 } else if processor.isProcessing {
-                    ProcessingView()
-                        .transition(.opacity)
+                    ProcessingView(onCancel: {
+                        processor.cancelProcessing()
+                        withAnimation(.spring(response: 0.3)) {
+                            processor.isProcessing = false
+                            processor.processingResult = nil
+                        }
+                    })
+                    .transition(.opacity)
                 } else if let result = processor.processingResult {
                     ResultView(result: result) {
                         Task {

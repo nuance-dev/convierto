@@ -18,6 +18,7 @@ enum ConversionError: LocalizedError {
     case resourceExhausted(resource: String)
     case conversionNotPossible(reason: String)
     case invalidInputType
+    case cancelled
     
     var errorDescription: String? {
         switch self {
@@ -53,6 +54,8 @@ enum ConversionError: LocalizedError {
             return "Conversion not possible: \(reason)"
         case .invalidInputType:
             return "InvalidInputType"
+        case .cancelled:
+            return "Operation was cancelled"
         }
     }
     

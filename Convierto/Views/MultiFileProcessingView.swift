@@ -47,6 +47,7 @@ class MultiFileProcessor: ObservableObject {
     @Published var isProcessing: Bool = false
     @Published var processingResult: ProcessingResult?
     private var processingTasks: [UUID: Task<Void, Never>] = [:]
+    private var currentTask: Task<Void, Never>?
     
     func addFiles(_ urls: [URL]) {
         let newFiles = urls.map { FileProcessingState(url: $0) }
@@ -81,6 +82,7 @@ class MultiFileProcessor: ObservableObject {
             await processFileInternal(with: id)
         }
         processingTasks[id] = task
+        currentTask = task
     }
     
     func saveAllFilesToFolder() async {
@@ -192,6 +194,27 @@ class MultiFileProcessor: ObservableObject {
             if let result = file.result {
                 await saveConvertedFile(url: result.outputURL, originalName: file.originalFileName)
             }
+        }
+    }
+    
+    func cancelProcessing() {
+        currentTask?.cancel()
+        isProcessing = false
+        processingResult = nil
+        
+        // Cancel all individual file processing tasks
+        for task in processingTasks.values {
+            task.cancel()
+        }
+        processingTasks.removeAll()
+        
+        // Reset progress
+        progress = 0
+        
+        // Update file states
+        for (index, _) in files.enumerated() where files[index].isProcessing {
+            files[index].isProcessing = false
+            files[index].error = ConversionError.cancelled
         }
     }
 }

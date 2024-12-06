@@ -20,7 +20,7 @@ public struct ConversionSettings {
     var videoBitRate: Int?
     var audioBitRate: Int?
     var frameRate: Int = 30
-    var videoDuration: Double = 3.0
+    var videoDuration: Double = 10.0
     
     // Animation settings
     var gifFrameCount: Int = 10
@@ -48,7 +48,7 @@ public struct ConversionSettings {
         videoBitRate: Int? = nil,
         audioBitRate: Int? = nil,
         frameRate: Int = 30,
-        videoDuration: Double = 3.0,
+        videoDuration: Double = 10.0,
         gifFrameCount: Int = 10,
         gifFrameDuration: Double = 0.1,
         animationStyle: AnimationStyle = .none
