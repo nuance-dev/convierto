@@ -87,7 +87,13 @@ struct DropZoneView: View {
                 DropZoneContent(
                     isDragging: isDragging,
                     showError: showError,
-                    errorMessage: errorMessage
+                    errorMessage: errorMessage,
+                    onTryAgain: {
+                        // Handle "Try Again" button action
+                    },
+                    onStartOver: {
+                        // Handle "Start Over" button action
+                    }
                 )
             }
             .padding(40)
@@ -121,6 +127,8 @@ private struct DropZoneContent: View {
     let isDragging: Bool
     let showError: Bool
     let errorMessage: String?
+    let onTryAgain: () -> Void
+    let onStartOver: () -> Void
     
     var body: some View {
         VStack(spacing: 16) {
@@ -148,10 +156,52 @@ private struct DropZoneContent: View {
                         isDragging ? "Release to Convert" : "Drop Files Here")
                     .font(.system(size: 16, weight: .medium))
                 
-                if !isDragging && !showError {
+                if showError {
+                    Text("Try dropping the file again or choose another")
+                        .font(.system(size: 14))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                } else if !isDragging {
                     Text("or click to browse")
                         .font(.system(size: 14))
                         .foregroundColor(.secondary)
+                }
+            }
+            
+            if showError {
+                HStack(spacing: 12) {
+                    Button(action: onStartOver) {
+                        Text("Start Over")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                    )
+                    
+                    Button(action: onTryAgain) {
+                        Text("Try Again")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(
+                                LinearGradient(
+                                    colors: [.red, .red.opacity(0.8)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                    )
                 }
             }
         }

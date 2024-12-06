@@ -140,8 +140,7 @@ class AudioProcessor: BaseConverter {
             } else {
                 return try await createWaveformImage(
                     from: asset,
-                    to: outputURL,
-                    format: format,
+                    to: format,
                     metadata: metadata,
                     progress: progress
                 )
@@ -300,34 +299,122 @@ class AudioProcessor: BaseConverter {
     
     func createWaveformImage(
         from asset: AVAsset,
-        to outputURL: URL,
-        format: UTType,
+        to format: UTType,
         metadata: ConversionMetadata,
         progress: Progress
     ) async throws -> ProcessingResult {
-        logger.debug("Creating waveform image")
+        logger.debug("📊 Starting waveform generation")
         
-        let waveformImage = try await visualizer.generateWaveformImage(
-            for: asset,
-            size: visualizer.size
+        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "png")
+        
+        do {
+            let waveformImage = try await visualizer.generateWaveformImage(for: asset, size: CGSize(width: 1920, height: 480))
+            let nsImage = NSImage(cgImage: waveformImage, size: NSSize(width: waveformImage.width, height: waveformImage.height))
+            
+            try await imageProcessor.saveImage(
+                nsImage,
+                format: format,
+                to: outputURL,
+                metadata: metadata
+            )
+            
+            return ProcessingResult(
+                outputURL: outputURL,
+                originalFileName: metadata.originalFileName ?? "waveform",
+                suggestedFileName: "waveform." + (format.preferredFilenameExtension ?? "png"),
+                fileType: format,
+                metadata: metadata.toDictionary()
+            )
+        } catch {
+            logger.error("❌ Waveform generation failed: \(error.localizedDescription)")
+            throw ConversionError.conversionFailed(reason: "Failed to generate waveform: \(error.localizedDescription)")
+        }
+    }
+    
+    private func extractAudioSamples(from asset: AVAsset) async throws -> [Float] {
+        guard let audioTrack = try await asset.loadTracks(withMediaType: .audio).first else {
+            throw ConversionError.conversionFailed(reason: "No audio track found")
+        }
+        
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(
+            track: audioTrack,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsFloatKey: false
+            ]
         )
         
-        let nsImage = NSImage(cgImage: waveformImage, size: visualizer.size)
+        reader.add(output)
+        guard reader.startReading() else {
+            throw ConversionError.conversionFailed(reason: "Failed to start reading audio")
+        }
         
-        try await imageProcessor.saveImage(
-            nsImage,
-            format: format,
-            to: outputURL,
-            metadata: metadata
+        var samples: [Float] = []
+        while let buffer = output.copyNextSampleBuffer() {
+            if let audioBuffer = CMSampleBufferGetDataBuffer(buffer) {
+                var length = 0
+                var dataPointer: UnsafeMutablePointer<Int8>?
+                CMBlockBufferGetDataPointer(audioBuffer, atOffset: 0, lengthAtOffsetOut: &length, totalLengthOut: nil, dataPointerOut: &dataPointer)
+                
+                let int16Pointer = UnsafeBufferPointer(
+                    start: UnsafeRawPointer(dataPointer)?.assumingMemoryBound(to: Int16.self),
+                    count: length / 2
+                )
+                
+                let floatSamples = int16Pointer.map { Float($0) / Float(Int16.max) }
+                samples.append(contentsOf: floatSamples)
+            }
+        }
+        
+        if samples.isEmpty {
+            throw ConversionError.conversionFailed(reason: "No audio samples extracted")
+        }
+        
+        return samples
+    }
+
+    private func generateWaveformImage(from samples: [Float], size: CGSize) async throws -> CGImage? {
+        let context = CGContext(
+            data: nil,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         )
         
-        return ProcessingResult(
-            outputURL: outputURL,
-            originalFileName: metadata.originalFileName ?? "waveform",
-            suggestedFileName: "waveform." + (format.preferredFilenameExtension ?? "png"),
-            fileType: format,
-            metadata: metadata.toDictionary()
-        )
+        guard let context else { return nil }
+        
+        context.setFillColor(NSColor.clear.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+        
+        let sampleCount = samples.count
+        let samplesPerPixel = sampleCount / Int(size.width)
+        let midY = size.height / 2
+        
+        context.setStrokeColor(NSColor.systemBlue.cgColor)
+        context.setLineWidth(1.0)
+        
+        for x in 0..<Int(size.width) {
+            let startSample = x * samplesPerPixel
+            let endSample = min(startSample + samplesPerPixel, sampleCount)
+            
+            if startSample < endSample {
+                let sampleSlice = samples[startSample..<endSample]
+                let amplitude = sampleSlice.reduce(0) { max($0, abs($1)) }
+                let height = amplitude * Float(size.height / 2)
+                
+                context.move(to: CGPoint(x: CGFloat(x), y: midY - CGFloat(height)))
+                context.addLine(to: CGPoint(x: CGFloat(x), y: midY + CGFloat(height)))
+                context.strokePath()
+            }
+        }
+        
+        return context.makeImage()
     }
     
     override func validateConversion(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {

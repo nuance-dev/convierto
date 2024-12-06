@@ -46,6 +46,8 @@ class MultiFileProcessor: ObservableObject {
     @Published var progress: Double = 0
     @Published var isProcessing: Bool = false
     @Published var processingResult: ProcessingResult?
+    @Published var error: ConversionError?
+    @Published var conversionResult: ProcessingResult?
     private var processingTasks: [UUID: Task<Void, Never>] = [:]
     private var currentTask: Task<Void, Never>?
     

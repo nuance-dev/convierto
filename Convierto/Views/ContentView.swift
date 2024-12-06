@@ -300,23 +300,24 @@ struct ContentView: View {
                 }
                 
                 let fileProcessor = FileProcessor()
-                let result = try await fileProcessor.processFile(url, outputFormat: selectedOutputFormat)
-                
-                withAnimation(.spring(response: 0.3)) {
-                    processor.isProcessing = false
-                    processor.processingResult = result
+                do {
+                    let result = try await fileProcessor.processFile(url, outputFormat: selectedOutputFormat)
+                    
+                    withAnimation(.spring(response: 0.3)) {
+                        processor.isProcessing = false
+                        processor.processingResult = result
+                    }
+                } catch {
+                    withAnimation(.spring(response: 0.3)) {
+                        processor.isProcessing = false
+                        errorMessage = error.localizedDescription
+                        showError = true
+                    }
                 }
             } catch {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     errorMessage = error.localizedDescription
                     showError = true
-                }
-                
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                    withAnimation {
-                        showError = false
-                        errorMessage = nil
-                    }
                 }
             }
         }

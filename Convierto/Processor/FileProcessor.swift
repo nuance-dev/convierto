@@ -186,22 +186,22 @@ class FileProcessor: ObservableObject {
                     )
                     
                 case (let input, let output) where input.conforms(to: .movie) && output.conforms(to: .audio):
-    logger.debug("🎵 Processing video audio extraction")
-    let audioProcessor = AudioProcessor()
-    let asset = AVURLAsset(url: url)
-    let outputURL = try await CacheManager.shared.createTemporaryURL(for: output.preferredFilenameExtension ?? "m4a")
-    return try await audioProcessor.convert(
-        asset,
-        to: outputURL,
-        format: output,
-        metadata: metadata,
-        progress: progress
-    )
-                
+                    logger.debug("🎵 Processing video audio extraction")
+                    let audioProcessor = AudioProcessor()
+                    let asset = AVURLAsset(url: url)
+                    let outputURL = try await CacheManager.shared.createTemporaryURL(for: output.preferredFilenameExtension ?? "m4a")
+                    return try await audioProcessor.convert(
+                        url,
+                        to: outputFormat,
+                        metadata: metadata,
+                        progress: progress
+                    )
+                    
                 // Audio Conversions
                 case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .audio):
                     logger.debug("🎵 Processing audio format conversion")
                     let audioProcessor = AudioProcessor()
+                    let asset = AVURLAsset(url: url)
                     return try await audioProcessor.convert(
                         url,
                         to: outputFormat,
@@ -226,11 +226,9 @@ class FileProcessor: ObservableObject {
                     logger.debug("📊 Processing audio waveform generation")
                     let audioProcessor = AudioProcessor()
                     let asset = AVURLAsset(url: url)
-                    let outputURL = try await CacheManager.shared.createTemporaryURL(for: output.preferredFilenameExtension ?? "png")
                     return try await audioProcessor.createWaveformImage(
                         from: asset,
-                        to: outputURL,
-                        format: output,
+                        to: output,
                         metadata: metadata,
                         progress: progress
                     )
