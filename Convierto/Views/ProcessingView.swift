@@ -36,6 +36,13 @@ struct ProcessingView: View {
                     )
             }
             
+            Text(tracker.currentStage.stageMessage)
+                .font(.system(size: 16, weight: .medium))
+            
+            Text(tracker.statusMessage)
+                .font(.system(size: 14))
+                .foregroundColor(.secondary)
+            
             Button(action: onCancel) {
                 Text("Cancel")
                     .font(.system(size: 14, weight: .medium))
