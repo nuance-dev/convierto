@@ -357,7 +357,7 @@ class FileProcessor: ObservableObject {
             return .direct
         }
         
-        logger.debug("���️ Checking format compatibility")
+        logger.debug("️ Checking format compatibility")
         switch (inputType, to: outputType) {
         case (let i, let o) where i.conforms(to: .image) && o.conforms(to: .image):
             logger.debug("✅ Image to image conversion strategy selected")

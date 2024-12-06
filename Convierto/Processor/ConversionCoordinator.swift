@@ -130,7 +130,17 @@ class ConversionCoordinator: NSObject {
         logger.debug("✅ Input type determined: \(inputType.identifier)")
         
         // Handle different conversion types with detailed logging
-        if inputType.conforms(to: .image) && outputFormat.conforms(to: .image) {
+        if inputType.conforms(to: .audio) && outputFormat.conforms(to: .audiovisualContent) {
+            logger.debug("🎵 Initiating audio-to-video conversion")
+            let audioProcessor = AudioProcessor()
+            logger.debug("✅ Audio processor created")
+            return try await audioProcessor.convert(
+                url,
+                to: outputFormat,
+                metadata: metadata,
+                progress: progress
+            )
+        } else if inputType.conforms(to: .image) && outputFormat.conforms(to: .image) {
             logger.debug("🎨 Initiating image-to-image conversion")
             let imageProcessor = ImageProcessor()
             logger.debug("✅ Image processor created")
@@ -140,7 +150,6 @@ class ConversionCoordinator: NSObject {
             let videoProcessor = VideoProcessor()
             logger.debug("✅ Video processor created")
             
-            // Load image first
             guard let image = NSImage(contentsOf: url) else {
                 logger.error("❌ Failed to load image from URL")
                 throw ConversionError.invalidInput
