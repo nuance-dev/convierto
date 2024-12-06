@@ -6,6 +6,7 @@ protocol MediaConverting {
     func convert(_ url: URL, to format: UTType, progress: Progress) async throws -> ProcessingResult
     func canConvert(from: UTType, to: UTType) -> Bool
     var settings: ConversionSettings { get }
+    func validateConversion(from: UTType, to: UTType) throws -> ConversionStrategy
 }
 
 class BaseConverter {

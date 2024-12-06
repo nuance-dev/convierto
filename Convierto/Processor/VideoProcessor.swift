@@ -101,4 +101,30 @@ class VideoProcessor: BaseConverter, MediaConverting {
             fileType: format
         )
     }
+    
+    func validateConversion(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {
+        guard canConvert(from: inputType, to: outputType) else {
+            throw ConversionError.incompatibleFormats
+        }
+        
+        switch (inputType, outputType) {
+        case (let i, let o) where i.conforms(to: .audiovisualContent) && o.conforms(to: .image):
+            return .extractFrame
+            
+        case (let i, let o) where i.conforms(to: .image) && o.conforms(to: .audiovisualContent):
+            return .createVideo
+            
+        case (let i, let o) where i.conforms(to: .audio) && o.conforms(to: .audiovisualContent):
+            return .visualize
+            
+        case (let i, let o) where i.conforms(to: .audiovisualContent) && o.conforms(to: .audio):
+            return .extractAudio
+            
+        case (let i, let o) where i.conforms(to: .audiovisualContent) && o.conforms(to: .audiovisualContent):
+            return .direct
+            
+        default:
+            throw ConversionError.incompatibleFormats
+        }
+    }
 }

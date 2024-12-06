@@ -13,6 +13,20 @@ class DocumentProcessor: BaseConverter, MediaConverting {
         super.init(settings: settings)
     }
     
+    func validateConversion(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {
+        guard canConvert(from: inputType, to: outputType) else {
+            throw ConversionError.incompatibleFormats
+        }
+        
+        if inputType == .pdf && outputType.conforms(to: .image) {
+            return .extractFrame
+        } else if inputType.conforms(to: .image) && outputType == .pdf {
+            return .createVideo
+        }
+        
+        throw ConversionError.incompatibleFormats
+    }
+    
     func canConvert(from: UTType, to: UTType) -> Bool {
         // Support PDF to image/video conversions
         if from == .pdf {

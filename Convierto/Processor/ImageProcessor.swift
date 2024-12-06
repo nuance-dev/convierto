@@ -370,4 +370,20 @@ class ImageProcessor: MediaConverting {
         
         return buffer
     }
+    
+    func validateConversion(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {
+        guard canConvert(from: inputType, to: outputType) else {
+            throw ConversionError.incompatibleFormats
+        }
+        
+        if inputType.conforms(to: .image) {
+            if outputType.conforms(to: .audiovisualContent) {
+                return .createVideo
+            } else if outputType.conforms(to: .image) {
+                return .direct
+            }
+        }
+        
+        throw ConversionError.incompatibleFormats
+    }
 }

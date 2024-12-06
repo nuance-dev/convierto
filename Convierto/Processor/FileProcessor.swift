@@ -9,56 +9,6 @@ private let logger = Logger(
     category: "FileProcessor"
 )
 
-enum ConversionError: LocalizedError {
-    case unsupportedFormat
-    case conversionFailed
-    case invalidInput
-    case incompatibleFormats
-    case exportFailed
-    case fileTooLarge
-    case conversionTimeout
-    case verificationFailed
-    case sameFormat
-    case documentConversionFailed
-    case fileAccessDenied
-    case sandboxViolation
-    case processingFailed
-    case timeout
-    
-    var errorDescription: String? {
-        switch self {
-        case .unsupportedFormat:
-            return "This file type isn't supported yet"
-        case .conversionFailed:
-            return "Unable to convert this file. Please try another format."
-        case .invalidInput:
-            return "This file appears to be damaged or inaccessible"
-        case .incompatibleFormats:
-            return "Can't convert between these formats"
-        case .exportFailed:
-            return "Unable to save the converted file"
-        case .fileTooLarge:
-            return "File is too large (max 100MB)"
-        case .conversionTimeout:
-            return "Conversion is taking too long"
-        case .verificationFailed:
-            return "The converted file appears to be invalid"
-        case .sameFormat:
-            return "File is already in this format"
-        case .documentConversionFailed:
-            return "Failed to convert document. Please try a different format."
-        case .fileAccessDenied:
-            return "Unable to access the file. Please check permissions."
-        case .sandboxViolation:
-            return "Cannot access this file due to system security. Try moving it to a different location."
-        case .processingFailed:
-            return "Failed to process the media file"
-        case .timeout:
-            return "Conversion timed out"
-        }
-    }
-}
-
 struct ProcessingResult {
     let outputURL: URL
     let originalFileName: String
@@ -80,41 +30,39 @@ class FileProcessor: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     
     // Memory management
-    private let memoryPressureHandler = MemoryPressureHandler()
-    private let resourceMonitor = ResourceMonitor()
+    private let memoryPressureHandler: MemoryPressureHandler
+    private let resourceMonitor: ResourceMonitor
+    private let fileValidator: FileValidator
     
-    init() {
-        let settings = ConversionSettings()
+    init(settings: ConversionSettings = ConversionSettings()) {
         self.imageProcessor = ImageProcessor(settings: settings)
         self.videoProcessor = VideoProcessor(settings: settings)
         self.audioProcessor = AudioProcessor(settings: settings)
         self.documentProcessor = DocumentProcessor(settings: settings)
+        self.memoryPressureHandler = MemoryPressureHandler()
+        self.resourceMonitor = ResourceMonitor()
+        self.fileValidator = FileValidator()
         
         setupMemoryPressureHandling()
     }
     
     private func setupMemoryPressureHandling() {
-        memoryPressureHandler.onPressureChange = { [weak self] pressure in
+        memoryPressureHandler.onPressureChange = { [weak self] (pressure: MemoryPressure) in
             switch pressure {
             case .warning:
                 self?.cleanupTemporaryResources()
             case .critical:
                 self?.cancelCurrentOperations()
-            default:
+            case .none:
                 break
             }
         }
     }
     
     func processFile(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
-        logger.info("Starting file processing for URL: \(url.lastPathComponent)")
+        isProcessing = true
+        progress = 0
         
-        await MainActor.run {
-            self.isProcessing = true
-            self.progress = 0
-        }
-        
-        // Resource monitoring
         let monitor = resourceMonitor.startMonitoring()
         defer {
             monitor.stop()
@@ -122,67 +70,128 @@ class FileProcessor: ObservableObject {
         }
         
         do {
-            let result = try await processFileWithValidation(url, outputFormat: outputFormat)
-            await MainActor.run {
-                self.progress = 1.0
-                self.isProcessing = false
+            // Validate input file
+            try await fileValidator.validateFile(url)
+            
+            // Get input type and determine strategy
+            let inputType = try await getFileType(url)
+            let converter = try await determineConverter(for: url, targetFormat: outputFormat)
+            let strategy = try converter.validateConversion(from: inputType, to: outputFormat)
+            
+            // Check resource requirements
+            if strategy.requiresBuffering {
+                guard resourceMonitor.hasAvailableMemory(required: strategy.estimatedMemoryUsage) else {
+                    throw ConversionError.insufficientMemory
+                }
             }
+            
+            // Setup progress tracking
+            let progress = Progress(totalUnitCount: 100)
+            setupProgressTracking(progress)
+            
+            // Process with timeout and strategy
+            let result = try await withTimeout(seconds: 300) {
+                try await self.processWithStrategy(url, to: outputFormat, strategy: strategy, progress: progress)
+            }
+            
+            self.progress = 1.0
+            isProcessing = false
+            
             return result
         } catch {
-            await MainActor.run {
-                self.isProcessing = false
-            }
+            isProcessing = false
             throw error
         }
     }
     
-    private func processFileWithValidation(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
-        // Validate input file
-        let validator = FileValidator()
-        try await validator.validateFile(url)
+    private func processWithStrategy(_ url: URL, to outputFormat: UTType, strategy: ConversionStrategy, progress: Progress) async throws -> ProcessingResult {
+        // Setup progress reporting
+        progress.totalUnitCount = 100
+        progress.fileOperationKind = .copying
         
-        // Determine conversion type and process
+        // Pre-conversion checks
+        guard resourceMonitor.hasAvailableMemory(required: strategy.estimatedMemoryUsage) else {
+            throw ConversionError.insufficientMemory
+        }
+        
+        guard resourceMonitor.hasAvailableDiskSpace else {
+            throw ConversionError.insufficientDiskSpace
+        }
+        
+        // Determine converter and validate compatibility
         let converter = try await determineConverter(for: url, targetFormat: outputFormat)
+        let fileType = try await getFileType(url)
+        guard converter.canConvert(from: fileType, to: outputFormat) else {
+            throw ConversionError.incompatibleFormats
+        }
         
-        // Setup progress tracking
-        let progress = Progress(totalUnitCount: 100)
-        setupProgressTracking(progress)
+        // Setup progress monitoring
+        let progressMonitor = ProgressMonitor(progress: progress)
+        progressMonitor.start()
         
-        // Process with timeout protection
-        return try await withTimeout(seconds: 300) {
-            try await converter.convert(url, to: outputFormat, progress: progress)
+        defer {
+            progressMonitor.stop()
+            cleanupTemporaryResources()
+        }
+        
+        do {
+            // Process with timeout protection
+            return try await withThrowingTaskGroup(of: ProcessingResult.self) { group in
+                group.addTask {
+                    let result = try await converter.convert(url, to: outputFormat, progress: progress)
+                    // Verify output
+                    try await self.validateOutput(result.outputURL, expectedType: outputFormat)
+                    return result
+                }
+                
+                // Wait for result with timeout
+                guard let result = try await group.next() else {
+                    throw ConversionError.conversionFailed
+                }
+                
+                return result
+            }
+        } catch {
+            throw ConversionError.conversionFailed
         }
     }
     
-    private func determineConverter(for url: URL, targetFormat: UTType) async throws -> MediaConverting {
+    private func determineConverter(for url: URL, targetFormat: UTType) async throws -> any MediaConverting {
         let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
         guard let inputType = resourceValues.contentType else {
             throw ConversionError.invalidInput
         }
         
-        // Enhanced conversion logic
+        // Enhanced conversion logic with smart fallbacks
         switch (inputType, targetFormat) {
         case (let input, let output) where input.conforms(to: .image):
             if output.conforms(to: .audiovisualContent) {
-                return videoProcessor
+                return videoProcessor // Will handle image-to-video conversion
+            } else if output.conforms(to: .pdf) {
+                return documentProcessor
             }
             return imageProcessor
             
         case (let input, let output) where input.conforms(to: .audio):
             if output.conforms(to: .audiovisualContent) {
-                return videoProcessor
+                return videoProcessor // Will create visualization
+            } else if output.conforms(to: .image) {
+                return imageProcessor // Will create waveform image
             }
             return audioProcessor
             
         case (let input, let output) where input.conforms(to: .audiovisualContent):
             if output.conforms(to: .image) {
-                return imageProcessor
+                return imageProcessor // Will extract frame
             } else if output.conforms(to: .audio) {
-                return audioProcessor
+                return audioProcessor // Will extract audio
             }
             return videoProcessor
             
-        case (.pdf, _), (_, .pdf):
+        case (.pdf, _) where targetFormat.conforms(to: .image):
+            return documentProcessor
+            
+        case (let input, .pdf) where input.conforms(to: .image):
             return documentProcessor
             
         default:
@@ -208,43 +217,40 @@ class FileProcessor: ObservableObject {
         isProcessing = false
         progress = 0
     }
-}
-
-// MARK: - Format Validation
-extension FileProcessor {
-    func validateFormat(_ format: UTType, for operation: String) -> Bool {
-        logger.debug("Validating format: \(format.identifier) for operation: \(operation)")
-        let supported = supportedFormats(for: operation).contains(format)
-        logger.debug("Format \(format.identifier) supported: \(supported)")
-        return supported
+    
+    private func validateOutput(_ url: URL, expectedType: UTType) async throws {
+        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+        guard let outputType = resourceValues.contentType,
+              outputType.conforms(to: expectedType) else {
+            throw ConversionError.conversionFailed
+        }
     }
     
-    private func supportedFormats(for operation: String) -> Set<UTType> {
-        switch operation {
-        case "input":
-            return [.jpeg, .png, .pdf, .mpeg4Movie, .quickTimeMovie, .mp3, .wav]
-        case "output":
-            return [.jpeg, .png, .pdf, .mpeg4Movie, .mp3, .wav]
-        default:
-            return []
+    private func getFileType(_ url: URL) async throws -> UTType {
+        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+        guard let contentType = resourceValues.contentType else {
+            throw ConversionError.invalidInput
         }
+        return contentType
     }
-}
-
-// Helper for timeout
-func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask {
-            try await operation()
+    
+    private func withTimeout<T>(seconds: Double, operation: @escaping () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw ConversionError.timeout
+            }
+            
+            guard let result = try await group.next() else {
+                throw ConversionError.conversionFailed
+            }
+            
+            group.cancelAll()
+            return result
         }
-        
-        group.addTask {
-            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            throw ConversionError.conversionTimeout
-        }
-        
-        let result = try await group.next()!
-        group.cancelAll()
-        return result
     }
 }
