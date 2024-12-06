@@ -1,55 +1,59 @@
-# Convierto - A Free MacOS Native File Converter App
+# Convierto - A Free macOS Native File Converter
 
-A lightweight, native macOS app that intelligently converts files while maintaining quality. Support for PDF, images, videos, and more! Simple, fast, and efficient!
+A powerful, native macOS app that intelligently converts files while maintaining quality. Built with SwiftUI for optimal performance and a seamless user experience.
 
-## Features
+## ✨ Features
 
 ### File Support
 
 - **PDFs**: Smart conversion while preserving readability
-- **Images**: Support for JPEG, PNG, HEIC, TIFF, GIF, BMP, WebP, SVG, RAW, and ICO
-- **Videos**: MP4, MOV, AVI, and other common formats
-- **Audio**: M4V, WAV, MP3, AIFF
+- **Images**: JPEG, PNG, HEIC, TIFF, GIF (including animated), BMP, WebP, SVG, RAW (CR2, NEF, ARW), ICO
+- **Videos**: MP4, MOV, AVI, MPEG/MPG
+- **Audio**: MP3, WAV, AIFF, M4A, AAC
+- **Documents**: PDF
 
 ### Core Features
 
-- **Multiple Input Methods**: Drag & drop or click to select files
-- **Real-time Progress**: Watch your files being converted with a clean progress indicator
-- **Dark and Light modes**: Seamlessly integrates with your system preferences
+- **Smart Conversion**: Intelligent format detection and optimal conversion settings
+- **Batch Processing**: Convert multiple files simultaneously
+- **Real-time Progress**: Detailed conversion progress with stage indicators
+- **Format Preview**: Visual preview of input and output formats
+- **Drag & Drop**: Intuitive file handling with drag and drop support
+- **Dark Mode**: Seamless integration with macOS appearance settings
 - **Native Performance**: Built with SwiftUI for optimal macOS integration
+- **Secure**: Sandboxed for enhanced security
 
-## 💻 Get Started
+## 💻 Requirements
 
-Download from the [releases](https://github.com/nuance-dev/Convierto/releases/) page.
+- macOS 14.0 or later
+- Apple Silicon or Intel processor
 
-## ⚡️ How it Works
+## 🚀 Getting Started
 
-1. Drop or select your files
-2.
+1. Download the latest version from the [releases page](https://github.com/nuance-dev/Convierto/releases)
+2. Open the app
+3. Drop your files or click to browse
+4. Select your desired output format
+5. Let Convierto handle the rest!
 
 ## 🛠 Technical Details
 
--
+- Built with SwiftUI and modern Apple frameworks
+- Sandboxed for security
+- Optimized for Apple Silicon
+- Uses native macOS media processing capabilities
 
-## 🔮 Features Coming Soon
+## 🔮 Coming Soon
 
--
+- Additional format support
+- Advanced conversion settings
+- Preset management
+- Keyboard shortcuts
+- Workflow automation
 
 ## 🤝 Contributing
 
-We welcome contributions! Here's how you can help:
-
-1. Clone the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-Please ensure your PR:
-
-- Follows the existing code style
-- Includes appropriate tests if applicable
-- Updates documentation as needed
+We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
 
 ## 📝 License
 
@@ -58,35 +62,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🔗 Links
 
 - Website: [Nuance](https://nuanc.me)
-- Report issues: [GitHub Issues](https://github.com/nuance-dev/Convierto/issues)
-- Follow updates: [@NuanceDev](https://twitter.com/Nuancedev)
-
-## Requirements
-
-- macOS 14.0 or later
-
-## Supported File Formats
-
-### Images
-
-- JPEG/JPG
-- PNG
-- HEIC
-- TIFF/TIF
-- GIF (including animated)
-- BMP
-- WebP
-- SVG
-- RAW (CR2, NEF, ARW)
-- ICO
-
-### Videos
-
-- MP4
-- MOV
-- AVI
-- MPEG/MPG
-
-### Documents
-
-- PDF
+- Issues: [GitHub Issues](https://github.com/nuance-dev/Convierto/issues)
+- Updates: [@NuanceDev](https://twitter.com/Nuancedev)
