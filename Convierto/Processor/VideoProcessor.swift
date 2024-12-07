@@ -94,7 +94,7 @@ class VideoProcessor: BaseConverter {
     ) async throws -> ProcessingResult {
         logger.debug("⚙️ Starting conversion process")
         
-        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
+        let outputURL = try CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
         let outputPath = outputURL.path(percentEncoded: false)
         logger.debug("📂 Created temporary output URL: \(outputPath)")
         
@@ -172,7 +172,7 @@ class VideoProcessor: BaseConverter {
         let time = CMTime(seconds: 0, preferredTimescale: 600)
         let imageRef = try await generator.image(at: time).image
         
-        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
+        let outputURL = try CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
         let nsImage = NSImage(cgImage: imageRef, size: NSSize(width: imageRef.width, height: imageRef.height))
         
         let imageProcessor = ImageProcessor()
@@ -272,10 +272,10 @@ class VideoProcessor: BaseConverter {
         return metadata
     }
     
-    private func createVideoFromImage(_ image: NSImage, format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+    internal func createVideoFromImage(_ image: NSImage, format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
         logger.debug("🎬 Creating video from image")
         
-        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
+        let outputURL = try CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
         logger.debug("📝 Output URL created: \(outputURL.path)")
         
         let videoWriter = try AVAssetWriter(url: outputURL, fileType: .mp4)

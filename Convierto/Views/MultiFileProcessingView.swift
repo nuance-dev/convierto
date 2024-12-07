@@ -90,29 +90,39 @@ class MultiFileProcessor: ObservableObject {
     }
     
     func saveAllFilesToFolder() async throws {
-        let panel = NSOpenPanel()
-        panel.canCreateDirectories = true
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.message = "Choose where to save all converted files"
-        panel.prompt = "Select Folder"
-        
-        guard let window = NSApp.windows.first else { 
-            throw ConversionError.conversionFailed(reason: "No window available")
-        }
-        
-        let response = await panel.beginSheetModal(for: window)
-        
-        if response == .OK, let folderURL = panel.url {
-            for file in files {
-                if let result = file.result {
-                    do {
-                        let destinationURL = folderURL.appendingPathComponent(result.suggestedFileName)
-                        try FileManager.default.copyItem(at: result.outputURL, to: destinationURL)
-                    } catch let error as NSError {
-                        logger.error("❌ Failed to save file \(file.originalFileName): \(error.localizedDescription)")
-                        throw ConversionError.exportFailed(reason: "Failed to save file: \(error.localizedDescription)")
+        return try await withCheckedThrowingContinuation { continuation in
+            Task {
+                do {
+                    let panel = NSOpenPanel()
+                    panel.canCreateDirectories = true
+                    panel.canChooseFiles = false
+                    panel.canChooseDirectories = true
+                    panel.message = "Choose where to save all converted files"
+                    panel.prompt = "Select Folder"
+                    
+                    guard let window = NSApp.windows.first else { 
+                        throw ConversionError.conversionFailed(reason: "No window available")
                     }
+                    
+                    let response = await panel.beginSheetModal(for: window)
+                    
+                    if response == .OK, let folderURL = panel.url {
+                        for file in files {
+                            if let result = file.result {
+                                do {
+                                    let destinationURL = folderURL.appendingPathComponent(result.suggestedFileName)
+                                    try FileManager.default.copyItem(at: result.outputURL, to: destinationURL)
+                                } catch {
+                                    throw ConversionError.exportFailed(reason: "Failed to save file: \(error.localizedDescription)")
+                                }
+                            }
+                        }
+                        continuation.resume()
+                    } else {
+                        continuation.resume(throwing: ConversionError.cancelled)
+                    }
+                } catch {
+                    continuation.resume(throwing: error)
                 }
             }
         }
@@ -281,6 +291,57 @@ class MultiFileProcessor: ObservableObject {
             error = nil
             conversionResult = nil
         }
+    }
+    
+    func processFile(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
+        let fileState = FileProcessingState(url: url)
+        files.append(fileState)
+        
+        guard let index = files.firstIndex(where: { $0.id == fileState.id }) else {
+            throw ConversionError.conversionFailed(reason: "Failed to track file state")
+        }
+        
+        files[index].isProcessing = true
+        files[index].progress = 0
+        files[index].stage = .analyzing
+        isProcessing = true
+        
+        do {
+            let processor = FileProcessor()
+            
+            let progressObserver = processor.$conversionProgress
+                .sink { [weak self] progress in
+                    guard let self = self else { return }
+                    self.files[index].progress = progress
+                    
+                    // Update stage based on progress
+                    if progress < 0.2 {
+                        self.files[index].stage = .analyzing
+                    } else if progress < 0.8 {
+                        self.files[index].stage = .converting
+                    } else if progress < 1.0 {
+                        self.files[index].stage = .optimizing
+                    }
+                    
+                    self.updateOverallProgress()
+                }
+            
+            let result = try await processor.processFile(url, outputFormat: outputFormat)
+            
+            if !Task.isCancelled {
+                files[index].result = result
+                files[index].progress = 1.0
+                files[index].stage = .completed
+            }
+            
+            progressObserver.cancel()
+            return result
+            
+        } catch {
+            files[index].error = error
+            files[index].stage = .failed
+            throw error
+        } 
     }
 }
 

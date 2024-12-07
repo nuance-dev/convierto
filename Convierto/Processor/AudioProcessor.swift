@@ -64,6 +64,7 @@ class AudioProcessor: BaseConverter {
         
         do {
             let asset = AVAsset(url: url)
+            try await asset.load(.tracks)
             logger.debug("📼 Asset created successfully")
             
             try await validateAudioAsset(asset)

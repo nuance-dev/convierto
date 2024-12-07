@@ -120,13 +120,13 @@ class CacheManager {
     }
     
     func trackActiveFile(_ url: URL) {
-        activeFilesQueue.sync {
+        _ = activeFilesQueue.sync {
             activeFiles.insert(url)
         }
     }
     
     func untrackActiveFile(_ url: URL) {
-        activeFilesQueue.sync {
+        _ = activeFilesQueue.sync {
             activeFiles.remove(url)
         }
     }

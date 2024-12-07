@@ -237,7 +237,7 @@ class AudioVisualizer {
             throw ConversionError.conversionFailed(reason: "No frames available")
         }
         
-        let frameURL = try await CacheManager.shared.createTemporaryURL(for: "temp.mp4")
+        let frameURL = try CacheManager.shared.createTemporaryURL(for: "temp.mp4")
         let writer = try AVAssetWriter(url: frameURL, fileType: .mp4)
         
         let videoSettings: [String: Any] = [

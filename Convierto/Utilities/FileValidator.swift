@@ -16,7 +16,7 @@ class FileValidator {
         }
         
         // Get file attributes
-        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey])
+        let resourceValues = try url.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey])
         
         // Validate file type
         guard let fileType = resourceValues.contentType else {

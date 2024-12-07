@@ -19,6 +19,7 @@ enum ConversionError: LocalizedError {
     case conversionNotPossible(reason: String)
     case invalidInputType
     case cancelled
+    case featureNotImplemented(feature: String)
     
     var errorDescription: String? {
         switch self {
@@ -56,6 +57,8 @@ enum ConversionError: LocalizedError {
             return "InvalidInputType"
         case .cancelled:
             return "Operation was cancelled"
+        case .featureNotImplemented(let feature):
+            return "Feature not implemented: \(feature)"
         }
     }
     

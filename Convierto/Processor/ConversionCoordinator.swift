@@ -150,7 +150,7 @@ class ConversionCoordinator: NSObject {
             let videoProcessor = VideoProcessor()
             logger.debug("✅ Video processor created")
             
-            guard let image = NSImage(contentsOf: url) else {
+    guard NSImage(contentsOf: url) != nil else {
                 logger.error("❌ Failed to load image from URL")
                 throw ConversionError.invalidInput
             }

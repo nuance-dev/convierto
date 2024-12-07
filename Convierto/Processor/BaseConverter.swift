@@ -191,12 +191,8 @@ class BaseConverter: MediaConverting {
             if #available(macOS 13.0, *) {
                 let session = AVAssetExportSession(asset: AVAsset(), presetName: AVAssetExportPresetHighestQuality)
                 return session?.supportedFileTypes.contains(.mp4) ?? false
-            } else {
-                return AVAssetExportSession.allExportPresets().contains(AVAssetExportPresetHighestQuality)
             }
-            
-        case .extractFrame:
-            return true
+            return AVAssetExportSession.allExportPresets().contains(AVAssetExportPresetHighestQuality)
             
         case .visualize:
             #if canImport(CoreImage)
@@ -205,18 +201,17 @@ class BaseConverter: MediaConverting {
             return false
             #endif
             
-        case .extractAudio:
+        case .combine:
+            return NSGraphicsContext.current != nil
+            
+            case .extractAudio:
             if #available(macOS 13.0, *) {
                 let session = AVAssetExportSession(asset: AVAsset(), presetName: AVAssetExportPresetAppleM4A)
                 return session?.supportedFileTypes.contains(.m4a) ?? false
             } else {
                 return AVAssetExportSession.allExportPresets().contains(AVAssetExportPresetAppleM4A)
             }
-            
-        case .combine:
-            return NSGraphicsContext.self != nil
-            
-        case .direct:
+        default:
             return true
         }
     }
@@ -231,6 +226,18 @@ class BaseConverter: MediaConverting {
             return true // Document processing doesn't require special permissions
         case .direct:
             return true // Basic conversion doesn't require special permissions
+        }
+    }
+    
+    func validateContext(_ context: CIContext?) throws {
+        guard context != nil else {
+            throw ConversionError.conversionFailed(reason: "Invalid graphics context")
+        }
+    }
+    
+    func validateType(_ type: Any.Type?) throws {
+        guard let _ = type else {
+            throw ConversionError.conversionFailed(reason: "Invalid type")
         }
     }
 }

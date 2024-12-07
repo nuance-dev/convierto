@@ -79,46 +79,46 @@ class FileProcessor: ObservableObject {
         logger.debug("🔄 Starting file processing")
         logger.debug("📂 Input URL: \(url.path)")
         
-        do {
-            // Create metadata for the file
-            let metadata = try await createMetadata(for: url)
-            
-            let result = try await processFile(url, outputFormat: outputFormat, metadata: metadata)
-            processingResults.append(result)
-            
-            // Verify the file exists and is accessible after processing
-            guard FileManager.default.fileExists(atPath: result.outputURL.path),
-                  FileManager.default.isReadableFile(atPath: result.outputURL.path) else {
-                logger.error("❌ Processed file not accessible: \(result.outputURL.path)")
-                throw ConversionError.exportFailed(reason: "Processed file not accessible")
+        // Create metadata for the file
+        let metadata = try await createMetadata(for: url)
+        
+        return try await withCheckedThrowingContinuation { [weak self] continuation in
+            guard let self = self else {
+                continuation.resume(throwing: ConversionError.conversionFailed(reason: "FileProcessor was deallocated"))
+                return
             }
             
-            // Set appropriate file permissions
-            try FileManager.default.setAttributes([
-                .posixPermissions: 0o644
-            ], ofItemAtPath: result.outputURL.path)
-            
-            return result
-        } catch {
-            logger.error("❌ Processing failed: \(error.localizedDescription)")
-            throw error
+            Task { [weak self] in
+                guard let self = self else {
+                    continuation.resume(throwing: ConversionError.conversionFailed(reason: "FileProcessor was deallocated"))
+                    return
+                }
+                
+                do {
+                    let result = try await self.processFile(url, outputFormat: outputFormat, metadata: metadata)
+                    self.processingResults.append(result)
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
     }
     
-    func cleanup() {
-        Task {
-            // Delay cleanup to ensure file operations are complete
-            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
-            for url in temporaryFiles {
-                try? FileManager.default.removeItem(at: url)
-            }
-            temporaryFiles.removeAll()
+    func cleanup() async {
+        for url in temporaryFiles {
+            try? FileManager.default.removeItem(at: url)
         }
+        temporaryFiles.removeAll()
+        currentStage = .idle
+        conversionProgress = 0
+        error = nil
     }
     
     deinit {
-        Task { @MainActor in
-            cleanup()
+        cancellables.removeAll()
+        Task { @MainActor [weak self] in
+            await self?.cleanup()
         }
     }
     
@@ -172,7 +172,7 @@ class FileProcessor: ObservableObject {
         
         // Setup progress observation
         let progressObserver = progress.observe(\.fractionCompleted) { [weak self] _, _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.conversionProgress = self?.progress.fractionCompleted ?? 0
             }
         }
@@ -249,20 +249,27 @@ class FileProcessor: ObservableObject {
                 case (let input, let output) where input.conforms(to: .movie) && output.conforms(to: .audio):
                     logger.debug("🎵 Processing video audio extraction")
                     let audioProcessor = AudioProcessor()
-                    let asset = AVURLAsset(url: url)
-                    let outputURL = try await CacheManager.shared.createTemporaryURL(for: output.preferredFilenameExtension ?? "m4a")
-                    return try await audioProcessor.convert(
-                        url,
-                        to: outputFormat,
-                        metadata: metadata,
-                        progress: progress
-                    )
+                    return try await withCheckedThrowingContinuation { continuation in
+                        Task {
+                            do {
+                                let result = try await audioProcessor.convert(
+                                    url,
+                                    to: outputFormat,
+                                    metadata: metadata,
+                                    progress: progress
+                                )
+                                continuation.resume(returning: result)
+                            } catch {
+                                continuation.resume(throwing: error)
+                            }
+                        }
+                    }
                     
                 // Audio Conversions
                 case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .audio):
                     logger.debug("🎵 Processing audio format conversion")
                     let audioProcessor = AudioProcessor()
-                    let asset = AVURLAsset(url: url)
+                _ = AVURLAsset(url: url)
                     return try await audioProcessor.convert(
                         url,
                         to: outputFormat,
@@ -273,7 +280,7 @@ class FileProcessor: ObservableObject {
                 case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .movie):
                     logger.debug("🎵 Processing audio visualization to video")
                     let audioProcessor = AudioProcessor()
-                    let outputURL = try await CacheManager.shared.createTemporaryURL(for: output.preferredFilenameExtension ?? "mp4")
+                _ = try await CacheManager.shared.createTemporaryURL(for: output.preferredFilenameExtension ?? "mp4")
                     let result = try await audioProcessor.convert(
                         url,
                         to: output,
@@ -337,7 +344,9 @@ class FileProcessor: ObservableObject {
     private func setupProgressTracking() {
         progress.publisher(for: \.fractionCompleted)
             .sink { [weak self] value in
-                self?.conversionProgress = value
+                Task { @MainActor in
+                    self?.conversionProgress = value
+                }
             }
             .store(in: &cancellables)
     }

@@ -29,9 +29,8 @@ class ImageProcessor: BaseConverter {
     }
     
     deinit {
-        // Use a detached task for cleanup
-        Task.detached { @MainActor in
-            GraphicsContextManager.shared.releaseContext(for: self.contextId)
+        Task { [contextId] in
+            try? await GraphicsContextManager.shared.releaseContext(for: contextId)
         }
     }
     
@@ -64,7 +63,9 @@ class ImageProcessor: BaseConverter {
         logger.debug("📄 Source type: \(sourceType.identifier)")
         
         // Create output URL
-        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
+        let outputURL = try await CacheManager.shared.createTemporaryURL(
+            for: format.preferredFilenameExtension ?? "jpg"
+        )
         logger.debug("📂 Output URL: \(outputURL.path)")
         
         // Configure destination options with detailed logging
@@ -150,7 +151,7 @@ class ImageProcessor: BaseConverter {
             throw ConversionError.invalidInput
         }
         
-        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
+        let outputURL = try CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
         
         // Create destination with proper type identifier
         guard let destination = CGImageDestinationCreateWithURL(
@@ -198,10 +199,15 @@ class ImageProcessor: BaseConverter {
         )
     }
     
-    func createVideoFromImage(_ image: NSImage, format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+    internal func createVideoFromImage(_ image: NSImage, format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+        logger.debug("🎬 Creating video from image")
+        
         let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
+        logger.debug("📝 Output URL created: \(outputURL.path)")
         
         let videoWriter = try AVAssetWriter(url: outputURL, fileType: .mp4)
+        logger.debug("✅ Created AVAssetWriter")
+        
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: Int(image.size.width),
@@ -222,91 +228,88 @@ class ImageProcessor: BaseConverter {
         
         videoWriter.add(videoInput)
         
-        await withCheckedContinuation { continuation in
+        return try await withCheckedThrowingContinuation { continuation in
             videoWriter.startWriting()
             videoWriter.startSession(atSourceTime: .zero)
             
             Task {
-                if let buffer = try? await createPixelBuffer(from: image) {
-                    adaptor.append(buffer, withPresentationTime: .zero)
+                do {
+                    let frameDuration = CMTimeMake(value: 1, timescale: Int32(settings.frameRate))
+                    let frameCount = Int(settings.videoDuration * Double(settings.frameRate))
+                    logger.debug("⚙️ Configured for \(frameCount) frames at \(self.settings.frameRate)fps")
+                    
+                    progress.totalUnitCount = Int64(frameCount)
+                    
+                    for frameIndex in 0..<frameCount {
+                        if let buffer = try await createPixelBuffer(from: image) {
+                            let presentationTime = CMTimeMultiply(frameDuration, multiplier: Int32(frameIndex))
+                            adaptor.append(buffer, withPresentationTime: presentationTime)
+                            progress.completedUnitCount = Int64(frameIndex + 1)
+                            logger.debug("📝 Writing video frame \(frameIndex + 1)/\(frameCount)")
+                        }
+                    }
+                    
+                    videoInput.markAsFinished()
+                    await videoWriter.finishWriting()
+                    logger.debug("✅ Video writing completed")
+                    
+                    let result = ProcessingResult(
+                        outputURL: outputURL,
+                        originalFileName: metadata.originalFileName ?? "image",
+                        suggestedFileName: "converted_video." + (format.preferredFilenameExtension ?? "mp4"),
+                        fileType: format,
+                        metadata: nil
+                    )
+                    
+                    continuation.resume(returning: result)
+                } catch {
+                    logger.error("❌ Video creation failed: \(error.localizedDescription)")
+                    continuation.resume(throwing: error)
                 }
-                
-                videoInput.markAsFinished()
-                await videoWriter.finishWriting()
-                continuation.resume()
             }
         }
-        
-        return ProcessingResult(
-            outputURL: outputURL,
-            originalFileName: metadata.originalFileName ?? "image",
-            suggestedFileName: "converted_video." + (format.preferredFilenameExtension ?? "mp4"),
-            fileType: format,
-            metadata: nil
-        )
     }
     
-    private func processImage(
+    private func processImageInternal(
         imageSource: CGImageSource,
-        outputFormat: UTType,
+        outputURL: URL, 
+        format: UTType,
         metadata: ConversionMetadata,
-        progress: Progress,
-        inputURL: URL,
-        outputURL: URL,
-        settings: ConversionSettings = ConversionSettings()
-    ) async throws -> ProcessingResult {
-        
-        // Configure conversion options
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceShouldCache: false,
-            kCGImageSourceShouldAllowFloat: true
-        ]
-        
-        progress.completedUnitCount = 30
-        
-        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, options as CFDictionary) else {
-            throw ConversionError.conversionFailed(reason: "Failed to create image")
-        }
-        
-        progress.completedUnitCount = 50
-        
-        // Create destination
-        guard let destination = CGImageDestinationCreateWithURL(
-            outputURL as CFURL,
-            outputFormat.identifier as CFString,
-            1,
-            nil
-        ) else {
-            throw ConversionError.exportFailed(reason: "Failed to create image destination")
-        }
-        
-        progress.completedUnitCount = 70
-        
+        progress: Progress
+    ) throws -> ProcessingResult {
         // Configure destination options
         let destinationOptions: [CFString: Any] = [
             kCGImageDestinationLossyCompressionQuality: settings.imageQuality,
             kCGImageDestinationOptimizeColorForSharing: true
         ]
         
-        // Add image to destination
-        CGImageDestinationAddImage(destination, cgImage, destinationOptions as CFDictionary)
+        // Create destination
+        guard let destination = CGImageDestinationCreateWithURL(
+            outputURL as CFURL,
+            format.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw ConversionError.exportFailed(reason: "Failed to create image destination")
+        }
         
-        progress.completedUnitCount = 90
+        // Add image to destination
+        if let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) {
+            CGImageDestinationAddImage(destination, cgImage, destinationOptions as CFDictionary)
+        } else {
+            throw ConversionError.conversionFailed(reason: "Failed to create image")
+        }
         
         // Finalize
         guard CGImageDestinationFinalize(destination) else {
             throw ConversionError.exportFailed(reason: "Failed to write image to disk")
         }
         
-        progress.completedUnitCount = 100
-        
         return ProcessingResult(
             outputURL: outputURL,
             originalFileName: metadata.originalFileName ?? "image",
-            suggestedFileName: "converted_image." + (outputFormat.preferredFilenameExtension ?? "jpg"),
-            fileType: outputFormat,
+            suggestedFileName: "converted_image." + (format.preferredFilenameExtension ?? "jpg"),
+            fileType: format,
             metadata: nil
         )
     }
@@ -322,7 +325,7 @@ class ImageProcessor: BaseConverter {
         var processedImage = ciImage
         
         // Use autoreleasepool to manage memory during processing
-        return try await autoreleasepool {
+        return try autoreleasepool {
             if settings.enhanceImage {
                 if let filter = CIFilter(name: "CIPhotoEffectInstant") {
                     filter.setValue(processedImage, forKey: kCIInputImageKey)
@@ -422,11 +425,7 @@ class ImageProcessor: BaseConverter {
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: Int(firstImage.size.width),
-            AVVideoHeightKey: Int(firstImage.size.height),
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 10000000,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
-            ]
+            AVVideoHeightKey: Int(firstImage.size.height)
         ]
         
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
@@ -459,7 +458,6 @@ class ImageProcessor: BaseConverter {
     }
     
     private func createPixelBuffer(from image: NSImage) async throws -> CVPixelBuffer? {
-        var pixelBuffer: CVPixelBuffer?
         let width = Int(image.size.width)
         let height = Int(image.size.height)
         
@@ -468,7 +466,8 @@ class ImageProcessor: BaseConverter {
             kCVPixelBufferCGBitmapContextCompatibilityKey: kCFBooleanTrue
         ] as CFDictionary
         
-        CVPixelBufferCreate(
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
             kCFAllocatorDefault,
             width,
             height,
@@ -477,29 +476,10 @@ class ImageProcessor: BaseConverter {
             &pixelBuffer
         )
         
-        guard let buffer = pixelBuffer else {
+        guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
+            logger.error("❌ Failed to create pixel buffer")
             return nil
         }
-        
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-        
-        guard let context = CGContext(
-            data: CVPixelBufferGetBaseAddress(buffer),
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else {
-            return nil
-        }
-        
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-        image.draw(in: CGRect(x: 0, y: 0, width: width, height: height))
-        NSGraphicsContext.restoreGraphicsState()
         
         return buffer
     }
@@ -527,7 +507,7 @@ class ImageProcessor: BaseConverter {
     }
     
     override func canConvert(from: UTType, to: UTType) -> Bool {
-        logger.debug("⚙️ Checking conversion compatibility: \(from.identifier) -> \(to.identifier)")
+        logger.debug("⚙��� Checking conversion compatibility: \(from.identifier) -> \(to.identifier)")
         
         // Allow conversion between any image formats
         if from.conforms(to: .image) && to.conforms(to: .image) {
@@ -540,46 +520,32 @@ class ImageProcessor: BaseConverter {
     }
     
     func processImage(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
-        logger.debug("🔄 Starting image conversion with detailed debugging")
-        
-        // Create image source
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             throw ConversionError.invalidInput
         }
         
-        // Create output URL
         let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
         
-        // Configure destination options
-        let destinationOptions: [CFString: Any] = [
-            kCGImageDestinationLossyCompressionQuality: settings.imageQuality,
-            kCGImageDestinationOptimizeColorForSharing: true
-        ]
-        
-        guard let destination = CGImageDestinationCreateWithURL(
-            outputURL as CFURL,
-            format.identifier as CFString,
-            1,
-            nil
-        ) else {
-            throw ConversionError.exportFailed(reason: "Failed to create image destination")
-        }
-        
-        // Perform conversion
-        if let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) {
-            CGImageDestinationAddImage(destination, cgImage, destinationOptions as CFDictionary)
+        return try await withCheckedThrowingContinuation { [weak self] continuation in
+            guard let self = self else {
+                continuation.resume(throwing: ConversionError.conversionFailed(reason: "Self is nil"))
+                return
+            }
             
-            if CGImageDestinationFinalize(destination) {
-                return ProcessingResult(
-                    outputURL: outputURL,
-                    originalFileName: metadata.originalFileName ?? "image",
-                    suggestedFileName: "converted_image." + (format.preferredFilenameExtension ?? "jpg"),
-                    fileType: format,
-                    metadata: nil
-                )
+            Task {
+                do {
+                    let result = try await self.processImageInternal(
+                        imageSource: imageSource,
+                        outputURL: outputURL,
+                        format: format,
+                        metadata: metadata,
+                        progress: progress
+                    )
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
         }
-        
-        throw ConversionError.conversionFailed(reason: "Failed to process image")
     }
 }

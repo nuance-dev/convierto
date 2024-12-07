@@ -67,7 +67,7 @@ actor ResourcePool {
     func cleanup(force: Bool = false) async {
         for (id, task) in activeTasks {
             if force || Date().timeIntervalSince(task.startTime) > 3600 { // 1 hour timeout
-                await endTask(id: id)
+                endTask(id: id)
             }
         }
     }

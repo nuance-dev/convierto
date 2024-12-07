@@ -79,7 +79,7 @@ class DocumentProcessor: BaseConverter {
     }
     
     private func determineInputType(_ url: URL) async throws -> UTType {
-        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+        let resourceValues = try url.resourceValues(forKeys: [.contentTypeKey])
         guard let contentType = resourceValues.contentType else {
             throw ConversionError.invalidInputType
         }
@@ -96,30 +96,41 @@ class DocumentProcessor: BaseConverter {
             throw ConversionError.invalidInput
         }
         
-        // Configure conversion options
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceShouldCache: false,
-            kCGImageSourceShouldAllowFloat: true
-        ]
-        
         try await resourcePool.checkMemoryAvailability(required: maxPageBufferSize * UInt64(pageCount))
         
         if pageCount == 1 {
-            return try await convertSinglePage(document.page(at: 0), format: outputFormat, metadata: metadata, progress: progress, options: options)
+            guard let page = document.page(at: 0) else {
+                throw ConversionError.documentProcessingFailed(reason: "Invalid PDF page")
+            }
+            let image = renderPDFPage(page)
+            let outputURL = try CacheManager.shared.createTemporaryURL(for: outputFormat.preferredFilenameExtension ?? "jpg")
+            try await imageProcessor.saveImage(image, format: outputFormat, to: outputURL, metadata: metadata)
+            progress.completedUnitCount = 100
+            
+            return ProcessingResult(
+                outputURL: outputURL,
+                originalFileName: metadata.originalFileName ?? "document",
+                suggestedFileName: "converted_page." + (outputFormat.preferredFilenameExtension ?? "jpg"),
+                fileType: outputFormat,
+                metadata: nil
+            )
         } else {
-            return try await convertMultiplePages(document, format: outputFormat, metadata: metadata, progress: progress, options: options)
+            return try await convertMultiplePages(document, format: outputFormat, metadata: metadata, progress: progress)
         }
     }
     
-    private func convertSinglePage(_ page: PDFPage?, format: UTType, metadata: ConversionMetadata, progress: Progress, options: [CFString: Any]) async throws -> ProcessingResult {
+    private func convertSinglePage(
+        _ page: PDFPage?,
+        format: UTType,
+        metadata: ConversionMetadata,
+        progress: Progress
+    ) async throws -> ProcessingResult {
         guard let page = page else {
             throw ConversionError.documentProcessingFailed(reason: "Invalid PDF page")
         }
         
-        let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
-        let image = await renderPDFPage(page)
+        let outputURL = try CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
+        let image = renderPDFPage(page)
         
         try await imageProcessor.saveImage(image, format: format, to: outputURL, metadata: metadata)
         progress.completedUnitCount = 100
@@ -133,10 +144,15 @@ class DocumentProcessor: BaseConverter {
         )
     }
     
-    private func convertMultiplePages(_ document: PDFDocument, format: UTType, metadata: ConversionMetadata, progress: Progress, options: [CFString: Any]) async throws -> ProcessingResult {
+    private func convertMultiplePages(
+        _ document: PDFDocument,
+        format: UTType,
+        metadata: ConversionMetadata,
+        progress: Progress
+    ) async throws -> ProcessingResult {
         let fileManager = FileManager.default
         let tempDir = fileManager.temporaryDirectory
-        let outputDir = try tempDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let outputDir = tempDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try fileManager.createDirectory(at: outputDir, withIntermediateDirectories: true)
         
         progress.totalUnitCount = Int64(document.pageCount)
@@ -146,7 +162,7 @@ class DocumentProcessor: BaseConverter {
             guard let page = document.page(at: pageIndex) else { continue }
             
             let pageURL = outputDir.appendingPathComponent("page_\(pageIndex + 1).\(format.preferredFilenameExtension ?? "jpg")")
-            let image = await renderPDFPage(page)
+            let image = renderPDFPage(page)
             
             try await imageProcessor.saveImage(image, format: format, to: pageURL, metadata: metadata)
             convertedFiles.append(pageURL)
@@ -163,38 +179,30 @@ class DocumentProcessor: BaseConverter {
         )
     }
     
-    private func renderPDFPage(_ page: PDFPage) async -> NSImage {
-        await withCheckedContinuation { continuation in
-            autoreleasepool {
-                let pageRect = page.bounds(for: .mediaBox)
-                let renderer = NSImage(size: pageRect.size)
-                
-                renderer.lockFocus()
-                if let context = NSGraphicsContext.current {
-                    context.imageInterpolation = .high
-                    context.shouldAntialias = true
-                    page.draw(with: .mediaBox, to: context.cgContext)
-                }
-                renderer.unlockFocus()
-                
-                continuation.resume(returning: renderer)
+    private func renderPDFPage(_ page: PDFPage) -> NSImage {
+        autoreleasepool {
+            let pageRect = page.bounds(for: .mediaBox)
+            let renderer = NSImage(size: pageRect.size)
+            
+            renderer.lockFocus()
+            if let context = NSGraphicsContext.current {
+                context.imageInterpolation = .high
+                context.shouldAntialias = true
+                page.draw(with: .mediaBox, to: context.cgContext)
             }
+            renderer.unlockFocus()
+            
+            return renderer
         }
     }
     
     private func convertPDFToVideo(_ url: URL, outputFormat: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
-        guard let document = PDFDocument(url: url), document.pageCount > 0 else {
-            throw ConversionError.documentProcessingFailed(reason: "Could not open PDF document or document is empty")
-        }
-        
-        let outputURL = try await CacheManager.shared.createTemporaryURL(for: outputFormat.preferredFilenameExtension ?? "mp4")
-        
-        // Implementation for PDF to video conversion
-        throw ConversionError.conversionFailed(reason: "PDF to video conversion not implemented")
+        // For now, throw a more descriptive error
+        throw ConversionError.featureNotImplemented(feature: "PDF to video conversion")
     }
     
     private func convertImageToPDF(_ url: URL, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
-        let outputURL = try await CacheManager.shared.createTemporaryURL(for: "pdf")
+        let outputURL = try CacheManager.shared.createTemporaryURL(for: "pdf")
         
         guard let image = NSImage(contentsOf: url) else {
             throw ConversionError.documentProcessingFailed(reason: "Could not load image")

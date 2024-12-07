@@ -290,7 +290,17 @@ struct ContentView: View {
                 processor.clearFiles()
                 processor.selectedOutputFormat = selectedOutputFormat
             }
-            processor.addFiles(urls)
+            
+            for url in urls {
+                do {
+                    _ = try await processor.processFile(url, outputFormat: selectedOutputFormat)
+                } catch {
+                    withAnimation(.spring(response: 0.3)) {
+                        errorMessage = error.localizedDescription
+                        showError = true
+                    }
+                }
+            }
         } else if let url = urls.first {
             do {
                 let resourceValues = try url.resourceValues(forKeys: [.contentTypeKey])
@@ -308,9 +318,8 @@ struct ContentView: View {
                     processor.isProcessing = true
                 }
                 
-                let fileProcessor = FileProcessor()
                 do {
-                    let result = try await fileProcessor.processFile(url, outputFormat: selectedOutputFormat)
+                    let result = try await processor.processFile(url, outputFormat: selectedOutputFormat)
                     
                     withAnimation(.spring(response: 0.3)) {
                         processor.isProcessing = false
