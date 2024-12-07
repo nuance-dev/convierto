@@ -231,14 +231,13 @@ class AudioVisualizer {
         from frames: [CGImage],
         duration: CMTime,
         settings: ConversionSettings,
+        outputURL: URL,
         progressHandler: ((Double) -> Void)? = nil
     ) async throws -> ProcessingResult {
         guard let firstFrame = frames.first else {
             throw ConversionError.conversionFailed(reason: "No frames available")
         }
         
-        // Create temporary URL and ensure it's tracked by CacheManager
-        let outputURL = try await CacheManager.shared.createTemporaryURL(for: "mp4")
         logger.debug("📝 Creating video at: \(outputURL.path)")
         
         // Ensure directory exists and is writable

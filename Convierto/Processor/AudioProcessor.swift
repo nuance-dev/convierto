@@ -326,19 +326,20 @@ class AudioProcessor: BaseConverter {
         let result = try await visualizer.createVideoTrack(
             from: frames,
             duration: duration,
-            settings: settings
-        ) { videoProgress in
-            Task { @MainActor in
-                let overallProgress = 0.75 + (videoProgress * 0.25)
-                progress.completedUnitCount = Int64(overallProgress * 100)
-                NotificationCenter.default.post(
-                    name: .processingProgressUpdated,
-                    object: nil,
-                    userInfo: ["progress": overallProgress]
-                )
+            settings: settings,
+            outputURL: tempURL,
+            progressHandler: { videoProgress in
+                Task { @MainActor in
+                    let overallProgress = 0.75 + (videoProgress * 0.25)
+                    progress.completedUnitCount = Int64(overallProgress * 100)
+                    NotificationCenter.default.post(
+                        name: .processingProgressUpdated,
+                        object: nil,
+                        userInfo: ["progress": overallProgress]
+                    )
+                }
             }
-
-        }
+        )
         
         // Ensure the file exists before returning
         guard FileManager.default.fileExists(atPath: tempURL.path) else {
