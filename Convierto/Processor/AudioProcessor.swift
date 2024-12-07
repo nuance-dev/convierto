@@ -36,6 +36,15 @@ class AudioProcessor: BaseConverter {
     }
     
     override func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+        // Add stage notification at the start
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: .processingStageChanged,
+                object: nil,
+                userInfo: ["stage": ConversionStage.analyzing]
+            )
+        }
+        
         logger.debug("🎵 Starting audio conversion process")
         logger.debug("📂 Input file: \(url.path)")
         logger.debug("🎯 Target format: \(format.identifier)")
@@ -67,6 +76,15 @@ class AudioProcessor: BaseConverter {
             try await asset.load(.tracks)
             logger.debug("📼 Asset created successfully")
             
+            // Update stage to analyzing
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: .processingStageChanged,
+                    object: nil,
+                    userInfo: ["stage": ConversionStage.analyzing]
+                )
+            }
+            
             try await validateAudioAsset(asset)
             logger.debug("✅ Asset validation passed")
             
@@ -76,11 +94,29 @@ class AudioProcessor: BaseConverter {
             let strategy = try determineConversionStrategy(from: asset, to: format)
             logger.debug("⚙️ Conversion strategy determined: \(String(describing: strategy))")
             
+            let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
+            await resourcePool.markFileAsActive(outputURL)
+            
+            defer {
+                Task {
+                    await resourcePool.markFileAsInactive(outputURL)
+                }
+            }
+            
+            // Update stage to converting
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: .processingStageChanged,
+                    object: nil,
+                    userInfo: ["stage": ConversionStage.converting]
+                )
+            }
+            
             let result = try await withTimeout(seconds: 300) {
                 logger.debug("⏳ Starting conversion with 300s timeout")
                 return try await self.executeConversion(
                     asset: asset,
-                    to: try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4"),
+                    to: outputURL,
                     format: format,
                     strategy: strategy,
                     progress: progress,
@@ -88,7 +124,26 @@ class AudioProcessor: BaseConverter {
                 )
             }
             
+            // Update stage to finishing
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: .processingStageChanged,
+                    object: nil,
+                    userInfo: ["stage": ConversionStage.optimizing]
+                )
+            }
+            
             logger.debug("✅ Conversion completed successfully")
+            
+            // Update stage to completed
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: .processingStageChanged,
+                    object: nil,
+                    userInfo: ["stage": ConversionStage.completed]
+                )
+            }
+            
             return result
             
         } catch let conversionError as ConversionError {
@@ -236,31 +291,19 @@ class AudioProcessor: BaseConverter {
         
         logger.debug("🎨 Creating audio visualization with format: \(videoFormat.identifier)")
         
+        // Store the URL in a property to prevent cleanup
+        let tempURL = outputURL
+        logger.debug("📝 Using output URL: \(tempURL.path)")
+        
         // Configure progress tracking
         progress.totalUnitCount = 100
         progress.completedUnitCount = 0
-        
-        // Update stage
-        NotificationCenter.default.post(
-            name: .processingStageChanged,
-            object: nil,
-            userInfo: ["stage": ConversionStage.analyzing]
-        )
         
         let duration = try await asset.load(.duration)
         let fps = 30
         let totalFrames = min(Int(duration.seconds * Double(fps)), 1800)
         
         logger.debug("⚙️ Generating \(totalFrames) frames for \(duration.seconds) seconds")
-        
-        // Update stage for frame generation
-        await MainActor.run {
-            NotificationCenter.default.post(
-                name: .processingStageChanged,
-                object: nil,
-                userInfo: ["stage": ConversionStage.converting]
-            )
-        }
         
         let frames = try await visualizer.generateVisualizationFrames(
             for: asset,
@@ -276,12 +319,9 @@ class AudioProcessor: BaseConverter {
             }
         }
         
-        // Update stage for video creation
-        NotificationCenter.default.post(
-            name: .processingStageChanged,
-            object: nil,
-            userInfo: ["stage": ConversionStage.optimizing]
-        )
+        // Create video writer with the stored URL
+        let videoWriter = try AVAssetWriter(url: tempURL, fileType: .mp4)
+        logger.debug("✅ Created video writer for: \(tempURL.path)")
         
         let result = try await visualizer.createVideoTrack(
             from: frames,
@@ -297,17 +337,16 @@ class AudioProcessor: BaseConverter {
                     userInfo: ["progress": overallProgress]
                 )
             }
+
         }
         
-        // Update final stage
-        NotificationCenter.default.post(
-            name: .processingStageChanged,
-            object: nil,
-            userInfo: ["stage": ConversionStage.completed]
-        )
+        // Ensure the file exists before returning
+        guard FileManager.default.fileExists(atPath: tempURL.path) else {
+            throw ConversionError.exportFailed(reason: "Output file not found at: \(tempURL.path)")
+        }
         
         return ProcessingResult(
-            outputURL: outputURL,
+            outputURL: tempURL,
             originalFileName: metadata.originalFileName ?? "audio_visualization",
             suggestedFileName: "visualized_audio.mp4",
             fileType: videoFormat,
@@ -609,3 +648,4 @@ class AudioProcessor: BaseConverter {
         )
     }
 }
+

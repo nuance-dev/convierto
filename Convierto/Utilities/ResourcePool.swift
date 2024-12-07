@@ -5,6 +5,8 @@ actor ResourcePool {
     static let shared = ResourcePool()
     private var activeTasks: [UUID: TaskInfo] = [:]
     private let queue = OperationQueue()
+    private var activeFiles: Set<URL> = []
+    private var temporaryFiles: Set<URL> = []
     
     struct TaskInfo {
         let type: ResourceType
@@ -103,5 +105,28 @@ actor ResourcePool {
         }
         
         return kerr == KERN_SUCCESS ? UInt64(info.resident_size) : 0
+    }
+    
+    func markFileAsActive(_ url: URL) {
+        activeFiles.insert(url)
+    }
+    
+    func markFileAsInactive(_ url: URL) {
+        activeFiles.remove(url)
+    }
+    
+    func addTemporaryFile(_ url: URL) {
+        temporaryFiles.insert(url)
+    }
+    
+    func removeTemporaryFile(_ url: URL) {
+        temporaryFiles.remove(url)
+    }
+    
+    func cleanup() {
+        for url in temporaryFiles where !activeFiles.contains(url) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        temporaryFiles.removeAll()
     }
 }
