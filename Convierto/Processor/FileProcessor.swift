@@ -53,12 +53,12 @@ enum ConversionStage {
 class FileProcessor: ObservableObject {
     @Published private(set) var currentStage: ConversionStage = .idle
     @Published private(set) var error: ConversionError?
-    @Published private(set) var conversionProgress: Double = 0
+    @Published var conversionProgress: Double = 0
     
     private let coordinator: ConversionCoordinator
     private let progressTracker = ProgressTracker()
     private var cancellables = Set<AnyCancellable>()
-    private let progress = Progress(totalUnitCount: 100)
+    let progress = Progress(totalUnitCount: 100)
     
     init(settings: ConversionSettings = ConversionSettings()) {
         self.coordinator = ConversionCoordinator()
@@ -224,12 +224,20 @@ class FileProcessor: ObservableObject {
                 case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .movie):
                     logger.debug("🎵 Processing audio visualization to video")
                     let audioProcessor = AudioProcessor()
-                    let outputURL = try await CacheManager.shared.createTemporaryURL(for: "mp4")
-                    return try await audioProcessor.convert(
+                    let outputURL = try await CacheManager.shared.createTemporaryURL(for: output.preferredFilenameExtension ?? "mp4")
+                    let result = try await audioProcessor.convert(
                         url,
-                        to: outputFormat,
+                        to: output,
                         metadata: metadata,
                         progress: progress
+                    )
+                    
+                    return ProcessingResult(
+                        outputURL: result.outputURL,
+                        originalFileName: result.originalFileName,
+                        suggestedFileName: "audio_visualization." + (output.preferredFilenameExtension ?? "mp4"),
+                        fileType: output,
+                        metadata: result.metadata
                     )
                     
                 case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .image):
@@ -278,11 +286,9 @@ class FileProcessor: ObservableObject {
     }
     
     private func setupProgressTracking() {
-        progressTracker.$progress
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] progressValue in
-                self?.conversionProgress = progressValue
-                self?.progress.completedUnitCount = Int64(progressValue * 100)
+        progress.publisher(for: \.fractionCompleted)
+            .sink { [weak self] value in
+                self?.conversionProgress = value
             }
             .store(in: &cancellables)
     }

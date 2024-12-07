@@ -2,6 +2,8 @@ import SwiftUI
 
 struct ProcessingView: View {
     @StateObject private var tracker = ProgressTracker()
+    @State private var progress: Double = 0
+    @State private var currentStage: ConversionStage = .idle
     @State private var isAnimating = false
     let onCancel: () -> Void
     
@@ -12,18 +14,12 @@ struct ProcessingView: View {
                     .stroke(Color.secondary.opacity(0.2), lineWidth: 4)
                     .frame(width: 64, height: 64)
                 
-                if tracker.isIndeterminate {
-                    Circle()
-                        .trim(from: 0, to: 0.7)
-                        .stroke(Color.accentColor, lineWidth: 4)
-                        .frame(width: 64, height: 64)
-                        .rotationEffect(.degrees(isAnimating ? 360 : 0))
-                } else {
-                    Circle()
-                        .trim(from: 0, to: tracker.progress)
-                        .stroke(Color.accentColor, lineWidth: 4)
-                        .frame(width: 64, height: 64)
-                }
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(Color.accentColor, lineWidth: 4)
+                    .frame(width: 64, height: 64)
+                    .rotationEffect(.degrees(-90))
+                    .animation(.linear(duration: 0.2), value: progress)
                 
                 Image(systemName: getStageIcon())
                     .font(.system(size: 24, weight: .medium))
@@ -36,10 +32,10 @@ struct ProcessingView: View {
                     )
             }
             
-            Text(tracker.currentStage.stageMessage)
+            Text(getStageText())
                 .font(.system(size: 16, weight: .medium))
             
-            Text(tracker.statusMessage)
+            Text("\(Int(progress * 100))%")
                 .font(.system(size: 14))
                 .foregroundColor(.secondary)
             
@@ -57,35 +53,55 @@ struct ProcessingView: View {
             )
         }
         .onAppear {
-            withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
-                isAnimating = true
+            setupNotificationObservers()
+        }
+    }
+    
+    private func setupNotificationObservers() {
+        NotificationCenter.default.addObserver(
+            forName: .processingStageChanged,
+            object: nil,
+            queue: .main
+        ) { notification in
+            if let stage = notification.userInfo?["stage"] as? ConversionStage {
+                withAnimation {
+                    self.currentStage = stage
+                }
+            }
+        }
+        
+        NotificationCenter.default.addObserver(
+            forName: .processingProgressUpdated,
+            object: nil,
+            queue: .main
+        ) { notification in
+            if let progress = notification.userInfo?["progress"] as? Double {
+                withAnimation {
+                    self.progress = progress
+                }
             }
         }
     }
     
     private func getStageIcon() -> String {
-        switch tracker.currentStage {
-        case .preparing: return "gear"
-        case .loading: return "arrow.down.circle"
+        switch currentStage {
+        case .idle: return "gear"
         case .analyzing: return "magnifyingglass"
-        case .processing: return "arrow.triangle.2.circlepath"
+        case .converting: return "arrow.triangle.2.circlepath"
         case .optimizing: return "slider.horizontal.3"
-        case .exporting: return "square.and.arrow.up"
-        case .finishing: return "checkmark.circle"
+        case .finalizing: return "checkmark.circle"
         case .completed: return "checkmark.circle.fill"
         case .failed: return "xmark.circle"
         }
     }
     
     private func getStageText() -> String {
-        switch tracker.currentStage {
-        case .preparing: return "Preparing"
-        case .loading: return "Loading"
-        case .analyzing: return "Analyzing"
-        case .processing: return "Converting"
-        case .optimizing: return "Optimizing"
-        case .exporting: return "Exporting"
-        case .finishing: return "Finishing Up"
+        switch currentStage {
+        case .idle: return "Preparing..."
+        case .analyzing: return "Analyzing..."
+        case .converting: return "Converting..."
+        case .optimizing: return "Optimizing..."
+        case .finalizing: return "Finalizing..."
         case .completed: return "Completed"
         case .failed: return "Failed"
         }

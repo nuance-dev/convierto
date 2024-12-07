@@ -40,6 +40,15 @@ class AudioProcessor: BaseConverter {
         logger.debug("📂 Input file: \(url.path)")
         logger.debug("🎯 Target format: \(format.identifier)")
         
+        // Validate settings
+        guard settings.videoBitRate > 0 else {
+            throw ConversionError.conversionFailed(reason: "Invalid video bitrate configuration")
+        }
+        
+        guard settings.audioBitRate > 0 else {
+            throw ConversionError.conversionFailed(reason: "Invalid audio bitrate configuration")
+        }
+        
         let taskId = UUID()
         logger.debug("🔑 Task ID: \(taskId.uuidString)")
         
@@ -119,6 +128,15 @@ class AudioProcessor: BaseConverter {
         progress: Progress,
         metadata: ConversionMetadata
     ) async throws -> ProcessingResult {
+        // Update stage
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: .processingStageChanged,
+                object: nil,
+                userInfo: ["stage": ConversionStage.converting]
+            )
+        }
+
         switch strategy {
         case .direct:
             return try await convertAudioFormat(
@@ -220,43 +238,71 @@ class AudioProcessor: BaseConverter {
         progress.totalUnitCount = 100
         progress.completedUnitCount = 0
         
+        // Update stage
+        NotificationCenter.default.post(
+            name: .processingStageChanged,
+            object: nil,
+            userInfo: ["stage": ConversionStage.analyzing]
+        )
+        
         let duration = try await asset.load(.duration)
         let fps = 30
         let totalFrames = min(Int(duration.seconds * Double(fps)), 1800)
         
         logger.debug("⚙️ Generating \(totalFrames) frames for \(duration.seconds) seconds")
         
-        // Generate frames with progress tracking
+        // Update stage for frame generation
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: .processingStageChanged,
+                object: nil,
+                userInfo: ["stage": ConversionStage.converting]
+            )
+        }
+        
         let frames = try await visualizer.generateVisualizationFrames(
             for: asset,
             frameCount: totalFrames
-        ) { [weak self] frameProgress in
-            progress.completedUnitCount = Int64(frameProgress * 50)
-            
+        ) { frameProgress in
             Task { @MainActor in
-                self?.progressTracker.updateProgress(for: "visualization", progress: frameProgress)
-                self?.progressTracker.setStage(.processing, message: "Generating visualization frames...")
+                progress.completedUnitCount = Int64(frameProgress * 75)
+                NotificationCenter.default.post(
+                    name: .processingProgressUpdated,
+                    object: nil,
+                    userInfo: ["progress": frameProgress]
+                )
             }
         }
         
-        progress.completedUnitCount = 50
+        // Update stage for video creation
+        NotificationCenter.default.post(
+            name: .processingStageChanged,
+            object: nil,
+            userInfo: ["stage": ConversionStage.optimizing]
+        )
         
-        await MainActor.run {
-            progressTracker.setStage(.optimizing, message: "Creating video track...")
-        }
-        
-        // Create video track
-        let videoTrack = try await visualizer.createVideoTrack(
+        let result = try await visualizer.createVideoTrack(
             from: frames,
             duration: duration,
             settings: settings
-        )
-        
-        progress.completedUnitCount = 75
-        
-        await MainActor.run {
-            progressTracker.setStage(.exporting, message: "Finalizing video...")
+        ) { videoProgress in
+            Task { @MainActor in
+                let overallProgress = 0.75 + (videoProgress * 0.25)
+                progress.completedUnitCount = Int64(overallProgress * 100)
+                NotificationCenter.default.post(
+                    name: .processingProgressUpdated,
+                    object: nil,
+                    userInfo: ["progress": overallProgress]
+                )
+            }
         }
+        
+        // Update final stage
+        NotificationCenter.default.post(
+            name: .processingStageChanged,
+            object: nil,
+            userInfo: ["stage": ConversionStage.completed]
+        )
         
         return ProcessingResult(
             outputURL: outputURL,

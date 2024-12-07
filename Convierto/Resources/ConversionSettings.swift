@@ -17,8 +17,8 @@ public struct ConversionSettings {
     
     // Video conversion settings
     var videoQuality: String = AVAssetExportPresetHighestQuality
-    var videoBitRate: Int?
-    var audioBitRate: Int?
+    var videoBitRate: Int = 10_000_000
+    var audioBitRate: Int = 256_000
     var frameRate: Int = 30
     var videoDuration: Double = 10.0
     
@@ -34,7 +34,7 @@ public struct ConversionSettings {
     }
     
     public init(
-        imageQuality: CGFloat = 0.95,
+        imageQuality: Double = 0.8,
         preserveMetadata: Bool = true,
         maintainAspectRatio: Bool = true,
         resizeImage: Bool = false,
@@ -45,8 +45,8 @@ public struct ConversionSettings {
         brightness: Double = 0.0,
         contrast: Double = 1.0,
         videoQuality: String = AVAssetExportPresetHighestQuality,
-        videoBitRate: Int? = nil,
-        audioBitRate: Int? = nil,
+        videoBitRate: Int = 10_000_000,
+        audioBitRate: Int = 256_000,
         frameRate: Int = 30,
         videoDuration: Double = 10.0,
         gifFrameCount: Int = 10,

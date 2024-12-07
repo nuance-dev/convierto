@@ -16,6 +16,7 @@ struct FileProcessingState: Identifiable {
     var result: ProcessingResult?
     var isProcessing: Bool
     var error: Error?
+    var stage: ConversionStage = .idle
     
     // Add this computed property
     var displayFileName: String {
@@ -35,6 +36,7 @@ struct FileProcessingState: Identifiable {
         self.result = nil
         self.isProcessing = false
         self.error = nil
+        self.stage = .idle
     }
 }
 
@@ -119,46 +121,80 @@ class MultiFileProcessor: ObservableObject {
         
         files[index].isProcessing = true
         files[index].progress = 0
+        files[index].stage = .analyzing
+        isProcessing = true
         
         do {
             let processor = FileProcessor()
+            
+            let progressObserver = processor.$conversionProgress
+                .sink { [weak self] progress in
+                    guard let self = self else { return }
+                    self.files[index].progress = progress
+                    
+                    // Update stage based on progress
+                    if progress < 0.2 {
+                        self.files[index].stage = .analyzing
+                    } else if progress < 0.8 {
+                        self.files[index].stage = .converting
+                    } else if progress < 1.0 {
+                        self.files[index].stage = .optimizing
+                    }
+                    
+                    self.updateOverallProgress()
+                }
+            
             let result = try await processor.processFile(fileState.url, outputFormat: selectedOutputFormat)
             
             if !Task.isCancelled {
                 files[index].result = result
                 files[index].progress = 1.0
+                files[index].stage = .completed
             }
+            
+            progressObserver.cancel()
         } catch {
             files[index].error = error
+            files[index].stage = .failed
         }
         
         files[index].isProcessing = false
         isProcessing = files.contains(where: { $0.isProcessing })
-        progress = Double(files.filter { $0.result != nil }.count) / Double(files.count)
+        updateOverallProgress()
+    }
+    
+    private func updateOverallProgress() {
+        let completedCount = Double(files.filter { $0.result != nil }.count)
+        let totalCount = Double(files.count)
+        updateProgress(totalCount > 0 ? completedCount / totalCount : 0)
     }
     
     func saveConvertedFile(url: URL, originalName: String) async {
         logger.debug("💾 Starting save process")
         logger.debug("📂 Source URL: \(url.path)")
         logger.debug("📝 Original name: \(originalName)")
-        logger.debug("🎯 Selected format: \(self.selectedOutputFormat.identifier)")
         
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
         panel.showsTagField = false
         
-        // Get the correct extension for the current format
-        let newExtension = selectedOutputFormat.preferredFilenameExtension ?? "converted"
-        logger.debug("📎 Target extension: \(newExtension)")
+        // Get the extension and UTType from the source URL
+        let sourceExtension = url.pathExtension
+        logger.debug("📎 Source extension: \(sourceExtension)")
         
         // Clean up the original filename
         let filenameWithoutExt = (originalName as NSString).deletingPathExtension
-        let suggestedFilename = "\(filenameWithoutExt)_converted.\(newExtension)"
+        let suggestedFilename = "\(filenameWithoutExt)_converted.\(sourceExtension)"
         logger.debug("📄 Suggested filename: \(suggestedFilename)")
         
         panel.nameFieldStringValue = suggestedFilename
         panel.message = "Choose where to save the converted file"
-        panel.allowedContentTypes = [selectedOutputFormat]
+        
+        // Use the actual file's UTType
+        if let fileType = try? UTType(filenameExtension: sourceExtension) {
+            panel.allowedContentTypes = [fileType]
+            logger.debug("🎯 Setting allowed content type: \(fileType.identifier)")
+        }
         
         guard let window = NSApp.windows.first else {
             logger.error("❌ No window found for save panel")
@@ -171,8 +207,8 @@ class MultiFileProcessor: ObservableObject {
             logger.debug("✅ Save location selected: \(saveURL.path)")
             
             do {
-                // Always ensure we're using the correct extension
-                let finalURL = saveURL.deletingPathExtension().appendingPathExtension(newExtension)
+                // Keep the original extension
+                let finalURL = saveURL.deletingPathExtension().appendingPathExtension(sourceExtension)
                 logger.debug("📍 Final save URL: \(finalURL.path)")
                 
                 if FileManager.default.fileExists(atPath: finalURL.path) {
@@ -186,8 +222,6 @@ class MultiFileProcessor: ObservableObject {
             } catch {
                 logger.error("❌ Failed to save file: \(error.localizedDescription)")
             }
-        } else {
-            logger.debug("❌ Save cancelled by user")
         }
     }
     
@@ -218,6 +252,11 @@ class MultiFileProcessor: ObservableObject {
             files[index].isProcessing = false
             files[index].error = ConversionError.cancelled
         }
+    }
+    
+    // Add a public method to update progress
+    func updateProgress(_ newProgress: Double) {
+        progress = newProgress
     }
 }
 

@@ -93,17 +93,23 @@ class AudioVisualizer {
             AVLinearPCMBitDepthKey: 32,
             AVLinearPCMIsFloatKey: true,
             AVLinearPCMIsBigEndianKey: false,
-            AVSampleRateKey: 44100
+            AVLinearPCMIsNonInterleaved: false,
+            AVSampleRateKey: 44100.0
         ]
         
-        let output = AVAssetReaderAudioMixOutput(audioTracks: [audioTrack], audioSettings: outputSettings)
-        reader.timeRange = CMTimeRange(start: time, duration: CMTime(seconds: windowSize, preferredTimescale: 600))
-        
-        guard reader.canAdd(output) else {
-            throw ConversionError.conversionFailed(reason: "Cannot add output to reader")
-        }
+        let output = AVAssetReaderTrackOutput(
+            track: audioTrack,
+            outputSettings: outputSettings
+        )
         
         reader.add(output)
+        
+        // Configure time range for reading
+        let timeRange = CMTimeRange(
+            start: time,
+            duration: CMTime(seconds: windowSize, preferredTimescale: 44100)
+        )
+        reader.timeRange = timeRange
         
         guard reader.startReading() else {
             throw ConversionError.conversionFailed(reason: "Failed to start reading audio")
@@ -111,31 +117,26 @@ class AudioVisualizer {
         
         var samples: [Float] = []
         while let sampleBuffer = output.copyNextSampleBuffer() {
-            guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
-            
-            var length = 0
-            var dataPointer: UnsafeMutablePointer<Int8>?
-            let status = CMBlockBufferGetDataPointer(
-                blockBuffer,
-                atOffset: 0,
-                lengthAtOffsetOut: nil,
-                totalLengthOut: &length,
-                dataPointerOut: &dataPointer
-            )
-            
-            guard status == kCMBlockBufferNoErr, let pointer = dataPointer else { continue }
-            
-            let bufferPointer = UnsafeBufferPointer<Float>(
-                start: UnsafePointer<Float>(OpaquePointer(pointer)),
-                count: length / MemoryLayout<Float>.stride
-            )
-            samples.append(contentsOf: bufferPointer)
+            autoreleasepool {
+                guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+                let length = CMBlockBufferGetDataLength(blockBuffer)
+                let sampleCount = length / MemoryLayout<Float>.size
+                
+                samples.reserveCapacity(sampleCount)
+                var data = [Float](repeating: 0, count: sampleCount)
+                
+                CMBlockBufferCopyDataBytes(
+                    blockBuffer,
+                    atOffset: 0,
+                    dataLength: length,
+                    destination: &data
+                )
+                
+                samples.append(contentsOf: data)
+            }
         }
         
-        if samples.isEmpty {
-            throw ConversionError.conversionFailed(reason: "No audio samples extracted")
-        }
-        
+        reader.cancelReading()
         return samples
     }
     
@@ -244,80 +245,74 @@ class AudioVisualizer {
     func createVideoTrack(
         from frames: [CGImage],
         duration: CMTime,
-        settings: ConversionSettings
-    ) async throws -> AVAssetTrack {
-        let frameURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("mov")
+        settings: ConversionSettings,
+        progressHandler: ((Double) -> Void)? = nil
+    ) async throws -> AVAssetWriterInput {
+        guard let firstFrame = frames.first else {
+            throw ConversionError.conversionFailed(reason: "No frames available")
+        }
         
-        let writer = try AVAssetWriter(url: frameURL, fileType: .mov)
+        let frameURL = try await CacheManager.shared.createTemporaryURL(for: "temp.mp4")
+        let writer = try AVAssetWriter(url: frameURL, fileType: .mp4)
+        
+        // Configure comprehensive video settings with non-optional values
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: Int(size.width),
-            AVVideoHeightKey: Int(size.height),
+            AVVideoWidthKey: NSNumber(value: firstFrame.width),
+            AVVideoHeightKey: NSNumber(value: firstFrame.height),
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 10_000_000,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
-            ]
+                AVVideoAverageBitRateKey: NSNumber(value: settings.videoBitRate),
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+                AVVideoMaxKeyFrameIntervalKey: NSNumber(value: 1),
+                AVVideoExpectedSourceFrameRateKey: NSNumber(value: settings.frameRate)
+            ] as [String: Any]
         ]
         
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        input.expectsMediaDataInRealTime = true
-        writer.add(input)
+        input.expectsMediaDataInRealTime = false
         
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: input,
             sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB),
-                kCVPixelBufferWidthKey as String: Int(size.width),
-                kCVPixelBufferHeightKey as String: Int(size.height)
+                kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: kCVPixelFormatType_32ARGB),
+                kCVPixelBufferWidthKey as String: NSNumber(value: firstFrame.width),
+                kCVPixelBufferHeightKey as String: NSNumber(value: firstFrame.height),
+                kCVPixelBufferCGImageCompatibilityKey as String: true,
+                kCVPixelBufferCGBitmapContextCompatibilityKey as String: true
             ]
         )
         
+        writer.add(input)
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
         
         let frameDuration = CMTime(value: duration.value / Int64(frames.count), timescale: duration.timescale)
         
         for (index, frame) in frames.enumerated() {
-            // Wait until the input is ready for more data
+            let progress = Double(index) / Double(frames.count)
+            progressHandler?(progress)
+            
             while !input.isReadyForMoreMediaData {
-                try await Task.sleep(nanoseconds: 10_000_000) // 10ms delay
-                
-                // Check for writer failures
+                try await Task.sleep(nanoseconds: 10_000_000)
                 if writer.status == .failed {
                     throw ConversionError.conversionFailed(reason: "Writer failed: \(String(describing: writer.error))")
                 }
-                
-                // Check for cancellation
                 try Task.checkCancellation()
             }
             
             if let buffer = try await createPixelBuffer(from: frame) {
                 let presentationTime = CMTime(value: Int64(index) * frameDuration.value, timescale: frameDuration.timescale)
-                
-                // Ensure we're on the main thread for UI updates
                 await MainActor.run {
                     adaptor.append(buffer, withPresentationTime: presentationTime)
                 }
             }
         }
         
-        // Mark completion and wait for writing to finish
         input.markAsFinished()
         await writer.finishWriting()
+        progressHandler?(1.0)
         
-        // Verify the writer completed successfully
-        if writer.status != .completed {
-            throw ConversionError.conversionFailed(reason: "Failed to finish writing: \(String(describing: writer.error))")
-        }
-        
-        let asset = AVAsset(url: frameURL)
-        guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
-            throw ConversionError.conversionFailed(reason: "No video track found")
-        }
-        
-        return videoTrack
+        return input
     }
     
     func generateWaveformImage(for asset: AVAsset, size: CGSize) async throws -> CGImage {
