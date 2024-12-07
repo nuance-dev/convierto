@@ -29,7 +29,10 @@ class ImageProcessor: BaseConverter {
     }
     
     deinit {
-        GraphicsContextManager.shared.releaseContext(for: contextId)
+        // Use a detached task for cleanup
+        Task.detached { @MainActor in
+            GraphicsContextManager.shared.releaseContext(for: self.contextId)
+        }
     }
     
     override func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
@@ -202,11 +205,15 @@ class ImageProcessor: BaseConverter {
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: Int(image.size.width),
-            AVVideoHeightKey: Int(image.size.height)
+            AVVideoHeightKey: Int(image.size.height),
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: settings.videoBitRate,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+            ]
         ]
         
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        videoInput.expectsMediaDataInRealTime = true
+        videoInput.expectsMediaDataInRealTime = false
         
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: videoInput,
@@ -215,19 +222,24 @@ class ImageProcessor: BaseConverter {
         
         videoWriter.add(videoInput)
         
-        videoWriter.startWriting()
-        videoWriter.startSession(atSourceTime: .zero)
-        
-        if let buffer = try await createPixelBuffer(from: image) {
-            adaptor.append(buffer, withPresentationTime: .zero)
+        await withCheckedContinuation { continuation in
+            videoWriter.startWriting()
+            videoWriter.startSession(atSourceTime: .zero)
+            
+            Task {
+                if let buffer = try? await createPixelBuffer(from: image) {
+                    adaptor.append(buffer, withPresentationTime: .zero)
+                }
+                
+                videoInput.markAsFinished()
+                await videoWriter.finishWriting()
+                continuation.resume()
+            }
         }
-        
-        videoInput.markAsFinished()
-        await videoWriter.finishWriting()
         
         return ProcessingResult(
             outputURL: outputURL,
-            originalFileName: metadata.originalFileName ?? "image_to_video",
+            originalFileName: metadata.originalFileName ?? "image",
             suggestedFileName: "converted_video." + (format.preferredFilenameExtension ?? "mp4"),
             fileType: format,
             metadata: nil

@@ -35,43 +35,28 @@ class AudioVisualizer {
             1800 // Max 60 seconds
         )
         
-        logger.debug("Generating \(actualFrameCount) frames for \(duration.seconds) seconds")
-        
-        let batchSize = 15
         var frames: [CGImage] = []
         frames.reserveCapacity(actualFrameCount)
         
-        for batchStart in stride(from: 0, to: actualFrameCount, by: batchSize) {
+        let timeStep = duration.seconds / Double(actualFrameCount)
+        
+        for frameIndex in 0..<actualFrameCount {
             if Task.isCancelled { break }
             
-            let batchEnd = min(batchStart + batchSize, actualFrameCount)
-            let timeStep = duration.seconds / Double(actualFrameCount)
+            let progress = Double(frameIndex) / Double(actualFrameCount)
+            progressHandler?(progress)
             
-            for frameIndex in batchStart..<batchEnd {
-                let progress = Double(frameIndex) / Double(actualFrameCount)
-                progressHandler?(progress)
-                
-                let time = CMTime(seconds: Double(frameIndex) * timeStep, preferredTimescale: 600)
-                
-                do {
-                    let samples = try await extractAudioSamples(from: asset, at: time, windowSize: timeStep)
-                    if let frame = try await generateVisualizationFrame(from: samples) {
-                        autoreleasepool {
-                            frames.append(frame)
-                        }
-                    }
-                    
-                    logger.debug("Generated frame \(frameIndex)/\(actualFrameCount)")
-                } catch {
-                    logger.error("Failed to generate frame \(frameIndex): \(error.localizedDescription)")
-                    continue
-                }
+            let time = CMTime(seconds: Double(frameIndex) * timeStep, preferredTimescale: 600)
+            
+            let samples = try await extractAudioSamples(from: asset, at: time, windowSize: timeStep)
+            if let frame = try await generateVisualizationFrame(from: samples) {
+                frames.append(frame)
             }
             
-            if batchStart % (batchSize * 4) == 0 {
-                logger.debug("🧹 Performing memory cleanup")
-                autoreleasepool { }
-            }
+            logger.debug("Generated frame \(frameIndex)/\(actualFrameCount)")
+            
+            // Allow time for memory cleanup
+            await Task.yield()
         }
         
         if frames.isEmpty {
@@ -255,14 +240,12 @@ class AudioVisualizer {
         let frameURL = try await CacheManager.shared.createTemporaryURL(for: "temp.mp4")
         let writer = try AVAssetWriter(url: frameURL, fileType: .mp4)
         
-        // Configure comprehensive video settings with non-optional values
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: NSNumber(value: firstFrame.width),
             AVVideoHeightKey: NSNumber(value: firstFrame.height),
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: NSNumber(value: settings.videoBitRate),
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
                 AVVideoMaxKeyFrameIntervalKey: NSNumber(value: 1),
                 AVVideoExpectedSourceFrameRateKey: NSNumber(value: settings.frameRate)
             ] as [String: Any]
@@ -300,12 +283,10 @@ class AudioVisualizer {
                 try Task.checkCancellation()
             }
             
-            if let buffer = try await createPixelBuffer(from: frame) {
-                let presentationTime = CMTime(value: Int64(index) * frameDuration.value, timescale: frameDuration.timescale)
-                await MainActor.run {
-                    adaptor.append(buffer, withPresentationTime: presentationTime)
-                }
-            }
+            let buffer = try await createPixelBuffer(from: frame)
+            let presentationTime = CMTime(value: Int64(index) * frameDuration.value, timescale: frameDuration.timescale)
+            
+            adaptor.append(buffer, withPresentationTime: presentationTime)
         }
         
         input.markAsFinished()
@@ -329,8 +310,7 @@ class AudioVisualizer {
         return frame
     }
     
-    internal func createPixelBuffer(from image: CGImage) throws -> CVPixelBuffer? {
-        var pixelBuffer: CVPixelBuffer?
+    internal func createPixelBuffer(from image: CGImage) async throws -> CVPixelBuffer {
         let width = image.width
         let height = image.height
         
@@ -339,6 +319,7 @@ class AudioVisualizer {
             kCVPixelBufferCGBitmapContextCompatibilityKey: kCFBooleanTrue
         ] as CFDictionary
         
+        var pixelBuffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(
             kCFAllocatorDefault,
             width,
@@ -349,29 +330,33 @@ class AudioVisualizer {
         )
         
         guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
-            return nil
+            throw ConversionError.conversionFailed(reason: "Failed to create pixel buffer")
         }
         
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-        
-        guard let context = CGContext(
-            data: CVPixelBufferGetBaseAddress(buffer),
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-        ) else {
-            return nil
+        return try await withCheckedThrowingContinuation { continuation in
+            Task {
+                CVPixelBufferLockBaseAddress(buffer, [])
+                defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+                
+                guard let context = CGContext(
+                    data: CVPixelBufferGetBaseAddress(buffer),
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                ) else {
+                    continuation.resume(throwing: ConversionError.conversionFailed(reason: "Failed to create context"))
+                    return
+                }
+                
+                let rect = CGRect(x: 0, y: 0, width: width, height: height)
+                context.draw(image, in: rect)
+                
+                continuation.resume(returning: buffer)
+            }
         }
-        
-        // Draw CGImage directly into context
-        let rect = CGRect(x: 0, y: 0, width: width, height: height)
-        context.draw(image, in: rect)
-        
-        return buffer
     }
     
     func generateVisualizationFrames(

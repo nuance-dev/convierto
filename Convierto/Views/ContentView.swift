@@ -236,10 +236,19 @@ struct ContentView: View {
                 } else if let result = processor.processingResult {
                     ResultView(result: result) {
                         Task {
-                            await processor.saveConvertedFile(url: result.outputURL, originalName: result.originalFileName)
+                            do {
+                                try await processor.saveConvertedFile(url: result.outputURL, originalName: result.originalFileName)
+                                processor.cleanup()
+                            } catch {
+                                withAnimation(.spring(response: 0.3)) {
+                                    errorMessage = error.localizedDescription
+                                    showError = true
+                                }
+                            }
                         }
                     } onReset: {
                         withAnimation(.spring(response: 0.3)) {
+                            processor.cleanup()
                             processor.processingResult = nil
                             processor.progress = 0
                             isMultiFileMode = false

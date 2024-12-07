@@ -89,7 +89,7 @@ class MultiFileProcessor: ObservableObject {
         currentTask = task
     }
     
-    func saveAllFilesToFolder() async {
+    func saveAllFilesToFolder() async throws {
         let panel = NSOpenPanel()
         panel.canCreateDirectories = true
         panel.canChooseFiles = false
@@ -97,7 +97,10 @@ class MultiFileProcessor: ObservableObject {
         panel.message = "Choose where to save all converted files"
         panel.prompt = "Select Folder"
         
-        guard let window = NSApp.windows.first else { return }
+        guard let window = NSApp.windows.first else { 
+            throw ConversionError.conversionFailed(reason: "No window available")
+        }
+        
         let response = await panel.beginSheetModal(for: window)
         
         if response == .OK, let folderURL = panel.url {
@@ -106,8 +109,9 @@ class MultiFileProcessor: ObservableObject {
                     do {
                         let destinationURL = folderURL.appendingPathComponent(result.suggestedFileName)
                         try FileManager.default.copyItem(at: result.outputURL, to: destinationURL)
-                    } catch {
-                        print("Failed to save file \(file.originalFileName): \(error.localizedDescription)")
+                    } catch let error as NSError {
+                        logger.error("❌ Failed to save file \(file.originalFileName): \(error.localizedDescription)")
+                        throw ConversionError.exportFailed(reason: "Failed to save file: \(error.localizedDescription)")
                     }
                 }
             }
@@ -169,23 +173,28 @@ class MultiFileProcessor: ObservableObject {
         updateProgress(totalCount > 0 ? completedCount / totalCount : 0)
     }
     
-    func saveConvertedFile(url: URL, originalName: String) async {
+    func saveConvertedFile(url: URL, originalName: String) async throws {
         logger.debug("💾 Starting save process")
         logger.debug("📂 Source URL: \(url.path)")
         logger.debug("📝 Original name: \(originalName)")
+        
+        // Verify source file exists
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            logger.error("❌ Source file does not exist at path: \(url.path)")
+            throw ConversionError.fileAccessDenied(path: url.path)
+        }
         
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
         panel.showsTagField = false
         
-        // Get the extension and UTType from the source URL
+        // Get the extension from the source URL
         let sourceExtension = url.pathExtension
         logger.debug("📎 Source extension: \(sourceExtension)")
         
         // Clean up the original filename
         let filenameWithoutExt = (originalName as NSString).deletingPathExtension
         let suggestedFilename = "\(filenameWithoutExt)_converted.\(sourceExtension)"
-        logger.debug("📄 Suggested filename: \(suggestedFilename)")
         
         panel.nameFieldStringValue = suggestedFilename
         panel.message = "Choose where to save the converted file"
@@ -198,7 +207,7 @@ class MultiFileProcessor: ObservableObject {
         
         guard let window = NSApp.windows.first else {
             logger.error("❌ No window found for save panel")
-            return
+            throw ConversionError.conversionFailed(reason: "No window available")
         }
         
         let response = await panel.beginSheetModal(for: window)
@@ -207,28 +216,25 @@ class MultiFileProcessor: ObservableObject {
             logger.debug("✅ Save location selected: \(saveURL.path)")
             
             do {
-                // Keep the original extension
-                let finalURL = saveURL.deletingPathExtension().appendingPathExtension(sourceExtension)
-                logger.debug("📍 Final save URL: \(finalURL.path)")
-                
-                if FileManager.default.fileExists(atPath: finalURL.path) {
-                    logger.debug("⚠️ Existing file found, removing")
-                    try FileManager.default.removeItem(at: finalURL)
-                }
-                
-                logger.debug("📦 Copying file to destination")
-                try FileManager.default.copyItem(at: url, to: finalURL)
+                try FileManager.default.copyItem(at: url, to: saveURL)
                 logger.debug("✅ File saved successfully")
             } catch {
                 logger.error("❌ Failed to save file: \(error.localizedDescription)")
+                throw ConversionError.exportFailed(reason: error.localizedDescription)
             }
         }
     }
     
-    func downloadAllFiles() async {
+    func downloadAllFiles() async throws {
         for file in files {
             if let result = file.result {
-                await saveConvertedFile(url: result.outputURL, originalName: file.originalFileName)
+                do {
+                    try await saveConvertedFile(url: result.outputURL, originalName: file.originalFileName)
+                } catch {
+                    logger.error("❌ Failed to save file \(file.originalFileName): \(error.localizedDescription)")
+                    // Throw the error to propagate it up
+                    throw ConversionError.exportFailed(reason: "Failed to save file: \(error.localizedDescription)")
+                }
             }
         }
     }
@@ -257,6 +263,24 @@ class MultiFileProcessor: ObservableObject {
     // Add a public method to update progress
     func updateProgress(_ newProgress: Double) {
         progress = newProgress
+    }
+    
+    @MainActor
+    func cleanup() {
+        Task { @MainActor in
+            // Cancel any ongoing processing
+            cancelProcessing()
+            
+            // Clear all files and results
+            clearFiles()
+            
+            // Reset state
+            isProcessing = false
+            processingResult = nil
+            progress = 0
+            error = nil
+            conversionResult = nil
+        }
     }
 }
 
@@ -321,7 +345,12 @@ struct MultiFileView: View {
             HStack(spacing: 16) {
                 Button(action: {
                     Task {
-                        await processor.downloadAllFiles()
+                        do {
+                            try await processor.saveAllFilesToFolder()
+                        } catch {
+                            logger.error("❌ Failed to save files: \(error.localizedDescription)")
+                            // Here you might want to show an error alert to the user
+                        }
                     }
                 }) {
                     HStack(spacing: 8) {
@@ -357,6 +386,25 @@ struct MultiFileView: View {
                     .foregroundColor(.secondary)
                 }
                 .menuStyle(.borderlessButton)
+                
+                Button(action: {
+                    Task {
+                        do {
+                            try await processor.downloadAllFiles()
+                        } catch {
+                            logger.error("❌ Failed to download files: \(error.localizedDescription)")
+                            // Here you might want to show an error alert to the user
+                        }
+                    }
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.and.arrow.down")
+                        Text("Download All")
+                    }
+                    .font(.system(size: 14, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .disabled(processor.files.allSatisfy { $0.result == nil })
             }
         }
         .padding(20)
@@ -369,6 +417,8 @@ struct FileItemView: View {
     let isHovered: Bool
     let onRemove: () -> Void
     @ObservedObject var processor: MultiFileProcessor
+    @State private var showError = false
+    @State private var errorMessage: String?
     
     var body: some View {
         HStack(spacing: 16) {
@@ -410,7 +460,12 @@ struct FileItemView: View {
                 if let result = file.result {
                     Button(action: {
                         Task {
-                            await processor.saveConvertedFile(url: result.outputURL, originalName: file.originalFileName)
+                            do {
+                                try await processor.saveConvertedFile(url: result.outputURL, originalName: file.originalFileName)
+                            } catch {
+                                errorMessage = error.localizedDescription
+                                showError = true
+                            }
                         }
                     }) {
                         Image(systemName: "square.and.arrow.down")
@@ -437,6 +492,11 @@ struct FileItemView: View {
                 .fill(isHovered ? Color(NSColor.controlBackgroundColor) : Color.clear)
         )
         .animation(.easeInOut(duration: 0.2), value: isHovered)
+        .alert("Error", isPresented: $showError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "An unknown error occurred")
+        }
     }
     
     private func getFileIcon() -> String {

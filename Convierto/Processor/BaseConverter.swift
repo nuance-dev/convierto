@@ -196,7 +196,7 @@ class BaseConverter: MediaConverting {
             }
             
         case .extractFrame:
-            return NSImage.self != nil
+            return true
             
         case .visualize:
             #if canImport(CoreImage)

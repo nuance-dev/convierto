@@ -183,14 +183,13 @@ class DocumentProcessor: BaseConverter {
     }
     
     private func convertPDFToVideo(_ url: URL, outputFormat: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
-        guard let document = PDFDocument(url: url) else {
-            throw ConversionError.documentProcessingFailed(reason: "Could not open PDF document")
+        guard let document = PDFDocument(url: url), document.pageCount > 0 else {
+            throw ConversionError.documentProcessingFailed(reason: "Could not open PDF document or document is empty")
         }
         
         let outputURL = try await CacheManager.shared.createTemporaryURL(for: outputFormat.preferredFilenameExtension ?? "mp4")
         
         // Implementation for PDF to video conversion
-        // This is a placeholder - actual implementation would go here
         throw ConversionError.conversionFailed(reason: "PDF to video conversion not implemented")
     }
     

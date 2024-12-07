@@ -39,7 +39,9 @@ class ProcessorFactory {
         processors.removeValue(forKey: type.identifier)
     }
     
-    func cleanup() {
-        processors.removeAll()
+    nonisolated func cleanup() {
+        Task { @MainActor in
+            processors.removeAll()
+        }
     }
 } 

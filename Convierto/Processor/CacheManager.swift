@@ -8,6 +8,9 @@ class CacheManager {
     private let cacheDirectory: URL
     private let maxCacheAge: TimeInterval = 24 * 60 * 60 // 24 hours
     
+    private var activeFiles: Set<URL> = []
+    private let activeFilesQueue = DispatchQueue(label: "com.convierto.cachemanager.activefiles")
+    
     private init() {
         let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
         cacheDirectory = cacheDir.appendingPathComponent("com.convierto.filecache", isDirectory: true)
@@ -37,20 +40,21 @@ class CacheManager {
        }
     
     func cleanupOldFiles() {
+        // Only clean files that aren't currently active
+        let currentActiveFiles = activeFilesQueue.sync { activeFiles }
+        
+        let cutoffDate = Date().addingTimeInterval(-3600) // 1 hour
         let fileManager = FileManager.default
-        let resourceKeys: [URLResourceKey] = [.creationDateKey, .isDirectoryKey]
         
         guard let enumerator = fileManager.enumerator(
             at: cacheDirectory,
-            includingPropertiesForKeys: resourceKeys,
-            options: .skipsHiddenFiles
+            includingPropertiesForKeys: [.creationDateKey, .isDirectoryKey]
         ) else { return }
         
-        let cutoffDate = Date().addingTimeInterval(-maxCacheAge)
-        
-        while let fileURL = enumerator.nextObject() as? URL {
+        for case let fileURL as URL in enumerator {
+            guard !currentActiveFiles.contains(fileURL) else { continue }
             do {
-                let resourceValues = try fileURL.resourceValues(forKeys: Set(resourceKeys))
+                let resourceValues = try fileURL.resourceValues(forKeys: Set([.creationDateKey, .isDirectoryKey]))
                 if let creationDate = resourceValues.creationDate,
                    let isDirectory = resourceValues.isDirectory,
                    !isDirectory && creationDate < cutoffDate {
@@ -113,5 +117,17 @@ class CacheManager {
         )
         
         return fileURL
+    }
+    
+    func trackActiveFile(_ url: URL) {
+        activeFilesQueue.sync {
+            activeFiles.insert(url)
+        }
+    }
+    
+    func untrackActiveFile(_ url: URL) {
+        activeFilesQueue.sync {
+            activeFiles.remove(url)
+        }
     }
 }

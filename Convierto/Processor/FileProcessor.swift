@@ -54,6 +54,8 @@ class FileProcessor: ObservableObject {
     @Published private(set) var currentStage: ConversionStage = .idle
     @Published private(set) var error: ConversionError?
     @Published var conversionProgress: Double = 0
+    private var temporaryFiles: Set<URL> = []
+    private var processingResults: [ProcessingResult] = []
     
     private let coordinator: ConversionCoordinator
     private let progressTracker = ProgressTracker()
@@ -74,6 +76,53 @@ class FileProcessor: ObservableObject {
     }
     
     func processFile(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
+        logger.debug("🔄 Starting file processing")
+        logger.debug("📂 Input URL: \(url.path)")
+        
+        do {
+            // Create metadata for the file
+            let metadata = try await createMetadata(for: url)
+            
+            let result = try await processFile(url, outputFormat: outputFormat, metadata: metadata)
+            processingResults.append(result)
+            
+            // Verify the file exists and is accessible after processing
+            guard FileManager.default.fileExists(atPath: result.outputURL.path),
+                  FileManager.default.isReadableFile(atPath: result.outputURL.path) else {
+                logger.error("❌ Processed file not accessible: \(result.outputURL.path)")
+                throw ConversionError.exportFailed(reason: "Processed file not accessible")
+            }
+            
+            // Set appropriate file permissions
+            try FileManager.default.setAttributes([
+                .posixPermissions: 0o644
+            ], ofItemAtPath: result.outputURL.path)
+            
+            return result
+        } catch {
+            logger.error("❌ Processing failed: \(error.localizedDescription)")
+            throw error
+        }
+    }
+    
+    func cleanup() {
+        Task {
+            // Delay cleanup to ensure file operations are complete
+            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
+            for url in temporaryFiles {
+                try? FileManager.default.removeItem(at: url)
+            }
+            temporaryFiles.removeAll()
+        }
+    }
+    
+    deinit {
+        Task { @MainActor in
+            cleanup()
+        }
+    }
+    
+    private func performProcessing(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
         logger.debug("🔄 Starting file processing")
         logger.debug("📂 Input URL: \(url.path)")
         logger.debug("🎯 Output format: \(outputFormat.identifier)")
@@ -409,7 +458,7 @@ class FileProcessor: ObservableObject {
         ])
         
         return ConversionMetadata(
-            originalFileName: resourceValues.name ?? "unknown",
+            originalFileName: resourceValues.name,
             originalFileType: resourceValues.contentType,
             creationDate: resourceValues.creationDate,
             modificationDate: resourceValues.contentModificationDate,

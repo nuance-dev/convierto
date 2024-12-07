@@ -145,8 +145,8 @@ class ConversionCoordinator: NSObject {
             let imageProcessor = ImageProcessor()
             logger.debug("✅ Image processor created")
             return try await imageProcessor.processImage(url, to: outputFormat, metadata: metadata, progress: progress)
-        } else if inputType.conforms(to: .image) && outputFormat.conforms(to: .movie) {
-            logger.debug("🎬 Initiating image-to-video conversion")
+} else if inputType.conforms(to: .image) && outputFormat.conforms(to: .movie) {
+    logger.debug("🎬 Initiating image-to-video conversion")
             let videoProcessor = VideoProcessor()
             logger.debug("✅ Video processor created")
             

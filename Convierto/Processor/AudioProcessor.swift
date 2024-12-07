@@ -52,8 +52,15 @@ class AudioProcessor: BaseConverter {
         let taskId = UUID()
         logger.debug("🔑 Task ID: \(taskId.uuidString)")
         
+        // Create a cleanup task that will run after conversion
+        defer {
+            Task {
+                await resourcePool.endTask(id: taskId)
+                logger.debug("🧹 Cleanup completed for task: \(taskId.uuidString)")
+            }
+        }
+        
         await resourcePool.beginTask(id: taskId, type: .audio)
-        defer { Task { await resourcePool.endTask(id: taskId) } }
         
         do {
             let asset = AVAsset(url: url)
@@ -68,27 +75,21 @@ class AudioProcessor: BaseConverter {
             let strategy = try determineConversionStrategy(from: asset, to: format)
             logger.debug("⚙️ Conversion strategy determined: \(String(describing: strategy))")
             
-            let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
-            logger.debug("📝 Output URL created: \(outputURL.path)")
-            
-            // Check if task was cancelled
-            if Task.isCancelled {
-                throw ConversionError.cancelled
-            }
-            
-            return try await withTimeout(seconds: 300) {
+            let result = try await withTimeout(seconds: 300) {
                 logger.debug("⏳ Starting conversion with 300s timeout")
-                let result = try await self.executeConversion(
+                return try await self.executeConversion(
                     asset: asset,
-                    to: outputURL,
+                    to: try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4"),
                     format: format,
                     strategy: strategy,
                     progress: progress,
                     metadata: metadata
                 )
-                logger.debug("✅ Conversion completed successfully")
-                return result
             }
+            
+            logger.debug("✅ Conversion completed successfully")
+            return result
+            
         } catch let conversionError as ConversionError {
             logger.error("❌ Conversion failed: \(conversionError.localizedDescription)")
             throw conversionError
