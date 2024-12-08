@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 import CoreImage
 import AppKit
 import os
+import AudioToolbox
 
 protocol ResourceManaging {
     func cleanup()
@@ -33,6 +34,12 @@ class VideoProcessor: BaseConverter {
         
         let asset = AVURLAsset(url: url)
         logger.debug("✅ Created AVURLAsset")
+        
+        // If target format is audio, handle audio extraction
+        if format.conforms(to: .audio) {
+            logger.debug("🎵 Extracting audio from video")
+            return try await extractAudio(from: asset, to: format, metadata: metadata, progress: progress)
+        }
         
         do {
             logger.debug("⚙️ Attempting primary conversion")
@@ -98,20 +105,21 @@ class VideoProcessor: BaseConverter {
         let outputPath = outputURL.path(percentEncoded: false)
         logger.debug("📂 Created temporary output URL: \(outputPath)")
         
-        guard let exportSession = try await createExportSession(for: asset, outputFormat: format) else {
+        let isAudioOnly = format.conforms(to: .audio)
+        guard let exportSession = try await createExportSession(for: asset, outputFormat: format, isAudioOnly: isAudioOnly) else {
             logger.error("❌ Failed to create export session")
             throw ConversionError.conversionFailed(reason: "Failed to create export session")
         }
         logger.debug("✅ Created export session")
         
+        // Configure export session
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = getAVFileType(for: format)
+        
         // Make exportSession Sendable by isolating it
         return try await withCheckedThrowingContinuation { continuation in
             Task {
                 do {
-                    exportSession.outputURL = outputURL
-                    exportSession.outputFileType = getAVFileType(for: format)
-                    logger.debug("⚙️ Configured export session with type: \(String(describing: exportSession.outputFileType?.rawValue))")
-                    
                     if let audioMix = try await createAudioMix(for: asset) {
                         exportSession.audioMix = audioMix
                         logger.debug("🎵 Applied audio mix")
@@ -385,5 +393,213 @@ class VideoProcessor: BaseConverter {
         NSGraphicsContext.restoreGraphicsState()
         
         return buffer
+    }
+    
+    private func extractAudio(from asset: AVAsset, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
+        logger.debug("🎵 Starting audio extraction")
+        
+        // Verify audio track exists
+        guard try await asset.loadTracks(withMediaType: .audio).first != nil else {
+            throw ConversionError.conversionFailed(reason: "No audio track found in video")
+        }
+        
+        // First convert to M4A regardless of target format
+        let tempURL = try CacheManager.shared.createTemporaryURL(for: "m4a")
+        logger.debug("📝 Output URL created: \(tempURL.path)")
+        
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+            throw ConversionError.conversionFailed(reason: "Failed to create export session")
+        }
+        
+        exportSession.outputURL = tempURL
+        exportSession.outputFileType = .m4a
+        
+        // Create progress tracking task
+        let progressTask = Task {
+            while !Task.isCancelled {
+                progress.completedUnitCount = Int64(exportSession.progress * 100)
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                if exportSession.status == .completed || exportSession.status == .failed {
+                    break
+                }
+            }
+        }
+        
+        await exportSession.export()
+        progressTask.cancel()
+        
+        if exportSession.status == .completed {
+            logger.debug("✅ Audio extraction completed")
+            
+            // If MP3 is requested, convert from M4A
+            if format == .mp3 {
+                logger.debug("🔄 Converting to MP3 format")
+                return try await convertToMP3(from: tempURL, metadata: metadata)
+            }
+            
+            // For other formats, just return the M4A result
+            return ProcessingResult(
+                outputURL: tempURL,
+                originalFileName: metadata.originalFileName ?? "audio",
+                suggestedFileName: "extracted_audio." + (format.preferredFilenameExtension ?? "m4a"),
+                fileType: format,
+                metadata: try await extractMetadata(from: asset)
+            )
+        } else {
+            throw ConversionError.exportFailed(reason: "Failed to extract audio: \(exportSession.error?.localizedDescription ?? "Unknown error")")
+        }
+    }
+    
+    private func convertToMP3(from url: URL, metadata: ConversionMetadata) async throws -> ProcessingResult {
+        logger.debug("🎵 Starting MP3 conversion")
+        
+        let outputURL = try CacheManager.shared.createTemporaryURL(for: "mp3")
+        logger.debug("📝 Created output URL: \(outputURL.path)")
+        
+        var audioFile: AudioFileID?
+        var outputAudioFile: AudioFileID?
+        
+        // Open input audio file
+        var status = AudioFileOpenURL(url as CFURL, .readPermission, 0, &audioFile)
+        guard status == noErr, let inputFile = audioFile else {
+            logger.error("❌ Failed to open input audio file")
+            throw ConversionError.conversionFailed(reason: "Failed to open input audio file")
+        }
+        defer { AudioFileClose(inputFile) }
+        
+        // Get input file format
+        var dataFormat = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        status = AudioFileGetProperty(inputFile, kAudioFilePropertyDataFormat, &size, &dataFormat)
+        guard status == noErr else {
+            logger.error("❌ Failed to get input file format")
+            throw ConversionError.conversionFailed(reason: "Failed to get input file format")
+        }
+        
+        // Configure output format for MP3
+        var outputFormat = AudioStreamBasicDescription(
+            mSampleRate: dataFormat.mSampleRate,
+            mFormatID: kAudioFormatMPEGLayer3,
+            mFormatFlags: 0,
+            mBytesPerPacket: 0,
+            mFramesPerPacket: 1152,
+            mBytesPerFrame: 0,
+            mChannelsPerFrame: dataFormat.mChannelsPerFrame,
+            mBitsPerChannel: 0,
+            mReserved: 0
+        )
+        
+        // Create audio converter
+        var audioConverter: AudioConverterRef?
+        status = AudioConverterNew(&dataFormat, &outputFormat, &audioConverter)
+        guard status == noErr, let converter = audioConverter else {
+            logger.error("❌ Failed to create audio converter")
+            throw ConversionError.conversionFailed(reason: "Failed to create audio converter")
+        }
+        defer { AudioConverterDispose(converter) }
+        
+        // Create output file
+        status = AudioFileCreateWithURL(
+            outputURL as CFURL,
+            kAudioFileMP3Type,
+            &outputFormat,
+            .eraseFile,
+            &outputAudioFile
+        )
+        guard status == noErr, let outputFile = outputAudioFile else {
+            logger.error("❌ Failed to create output audio file")
+            throw ConversionError.conversionFailed(reason: "Failed to create output audio file")
+        }
+        defer { AudioFileClose(outputFile) }
+        
+        // Set up conversion buffers
+        let bufferSize = 32768
+        var inputBuffer = [UInt8](repeating: 0, count: bufferSize)
+        
+        var audioBufferData = AudioBufferData(
+            data: &inputBuffer,
+            size: bufferSize
+        )
+        
+        // Perform conversion
+        var outputBuffer = [UInt8](repeating: 0, count: bufferSize)
+        var outputBufferList = AudioBufferList()
+        outputBufferList.mNumberBuffers = 1
+        outputBufferList.mBuffers.mNumberChannels = outputFormat.mChannelsPerFrame
+        outputBufferList.mBuffers.mDataByteSize = UInt32(bufferSize)
+        
+        // Safely bind the output buffer
+        withUnsafeMutableBytes(of: &outputBuffer) { bufferPointer in
+            outputBufferList.mBuffers.mData = bufferPointer.baseAddress
+        }
+        
+        var outputFilePos: Int64 = 0
+        
+        repeat {
+            var numPackets: UInt32 = UInt32(bufferSize / MemoryLayout<UInt8>.stride)
+            status = AudioConverterFillComplexBuffer(
+                converter,
+                converterCallback,
+                &audioBufferData,
+                &numPackets,
+                &outputBufferList,
+                nil
+            )
+            
+            if numPackets > 0 {
+                status = AudioFileWritePackets(
+                    outputFile,
+                    false,
+                    outputBufferList.mBuffers.mDataByteSize,
+                    nil,
+                    outputFilePos,
+                    &numPackets,
+                    &outputBuffer
+                )
+                outputFilePos += Int64(numPackets)
+            }
+        } while status == noErr
+        
+        return ProcessingResult(
+            outputURL: outputURL,
+            originalFileName: metadata.originalFileName ?? "audio",
+            suggestedFileName: "converted_audio.mp3",
+            fileType: .mp3,
+            metadata: metadata.toDictionary()
+        )
+    }
+    
+    // Audio converter callback function
+    private let converterCallback: AudioConverterComplexInputDataProc = { (
+        _: AudioConverterRef,
+        ioNumberDataPackets: UnsafeMutablePointer<UInt32>,
+        ioData: UnsafeMutablePointer<AudioBufferList>,
+        _: UnsafeMutablePointer<UnsafeMutablePointer<AudioStreamPacketDescription>?>?,
+        inUserData: UnsafeMutableRawPointer?
+    ) -> OSStatus in
+        guard let userData = inUserData else {
+            ioNumberDataPackets.pointee = 0
+            return noErr
+        }
+        
+        let audioData = userData.assumingMemoryBound(to: AudioBufferData.self).pointee
+        
+        if audioData.size == 0 {
+            ioNumberDataPackets.pointee = 0
+            return noErr
+        }
+        
+        // Directly modify the AudioBufferList instead of using UnsafeMutableAudioBufferListPointer
+        ioData.pointee.mBuffers.mData = audioData.data
+        ioData.pointee.mBuffers.mDataByteSize = UInt32(audioData.size)
+        ioData.pointee.mBuffers.mNumberChannels = 2
+        
+        return noErr
+    }
+    
+    // Add this struct to store audio buffer data
+    private struct AudioBufferData {
+        var data: UnsafeMutableRawPointer
+        var size: Int
     }
 }

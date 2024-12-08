@@ -50,10 +50,11 @@ class BaseConverter: MediaConverting {
         outputFormat: UTType,
         isAudioOnly: Bool = false
     ) async throws -> AVAssetExportSession? {
-        return AVAssetExportSession(
-            asset: asset,
-            presetName: isAudioOnly ? AVAssetExportPresetAppleM4A : settings.videoQuality
-        )
+        let presetName = isAudioOnly ? AVAssetExportPresetAppleM4A : settings.videoQuality
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: presetName) else {
+            throw ConversionError.conversionFailed(reason: "Failed to create export session")
+        }
+        return exportSession
     }
     
     func createAudioMix(for asset: AVAsset) async throws -> AVAudioMix? {
@@ -204,7 +205,7 @@ class BaseConverter: MediaConverting {
         case .combine:
             return NSGraphicsContext.current != nil
             
-            case .extractAudio:
+        case .extractAudio:
             if #available(macOS 13.0, *) {
                 let session = AVAssetExportSession(asset: AVAsset(), presetName: AVAssetExportPresetAppleM4A)
                 return session?.supportedFileTypes.contains(.m4a) ?? false
