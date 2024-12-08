@@ -14,11 +14,31 @@ class AudioProcessor: BaseConverter {
     private let imageProcessor: ImageProcessor
     private let resourcePool: ResourcePool
     private let progressTracker: ProgressTracker
-    private let maxBufferSize: Int = 1024 * 1024 // 1MB buffer size
+    private let config: AudioProcessorConfig
     
     required init(settings: ConversionSettings = ConversionSettings()) {
+        self.config = .default
         self.resourcePool = ResourcePool.shared
-        self.visualizer = AudioVisualizer(size: CGSize(width: 1920, height: 1080))
+        self.visualizer = AudioVisualizer(size: config.waveformSize)
+        self.imageProcessor = ImageProcessor(settings: settings)
+        self.progressTracker = ProgressTracker()
+        super.init(settings: settings)
+    }
+    
+    init(settings: ConversionSettings = ConversionSettings(), 
+         config: AudioProcessorConfig = .default) throws {
+        self.config = config
+        try config.validate()
+        
+        guard settings.videoBitRate > 0 else {
+            throw ConversionError.invalidConfiguration("Video bitrate must be positive")
+        }
+        guard settings.audioBitRate > 0 else {
+            throw ConversionError.invalidConfiguration("Audio bitrate must be positive")
+        }
+        
+        self.resourcePool = ResourcePool.shared
+        self.visualizer = AudioVisualizer(size: config.waveformSize)
         self.imageProcessor = ImageProcessor(settings: settings)
         self.progressTracker = ProgressTracker()
         super.init(settings: settings)
@@ -91,7 +111,7 @@ class AudioProcessor: BaseConverter {
             try await resourcePool.checkResourceAvailability(taskId: taskId, type: .audio)
             logger.debug("✅ Resource availability confirmed")
             
-            let strategy = try determineConversionStrategy(from: asset, to: format)
+            let strategy = try await determineConversionStrategy(from: asset, to: format)
             logger.debug("⚙️ Conversion strategy determined: \(String(describing: strategy))")
             
             let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
@@ -166,15 +186,35 @@ class AudioProcessor: BaseConverter {
         }
     }
     
-    private func determineConversionStrategy(from asset: AVAsset, to format: UTType) throws -> ConversionStrategy {
-        if format.conforms(to: .audiovisualContent) {
-            return .visualize
-        } else if format.conforms(to: .image) {
-            return .extractFrame
-        } else if format.conforms(to: .audio) {
-            return .direct
+    private func determineConversionStrategy(from asset: AVAsset, to format: UTType) async throws -> ConversionStrategy {
+        logger.debug("Determining conversion strategy for format: \(format.identifier)")
+        
+        let strategy: ConversionStrategy
+        
+        switch format {
+        case _ where format.conforms(to: .audiovisualContent):
+            logger.debug("Selected visualization strategy for audiovisual content")
+            strategy = .visualize
+            
+        case _ where format.conforms(to: .image):
+            logger.debug("Selected visualization strategy for image output")
+            strategy = .visualize
+            
+        case _ where format.conforms(to: .audio):
+            logger.debug("Selected direct conversion strategy for audio output")
+            strategy = .direct
+            
+        default:
+            logger.error("No suitable conversion strategy found")
+            throw ConversionError.incompatibleFormats(from: .audio, to: format)
         }
-        throw ConversionError.incompatibleFormats(from: .audio, to: format)
+        
+        // Verify strategy is supported
+        guard await checkStrategySupport(strategy) else {
+            throw ConversionError.unsupportedConversion("Strategy \(strategy) is not supported")
+        }
+        
+        return strategy
     }
     
     private func executeConversion(
@@ -466,8 +506,12 @@ class AudioProcessor: BaseConverter {
         return samples
     }
 
-    private func generateWaveformImage(from samples: [Float], size: CGSize) async throws -> CGImage? {
-        let context = CGContext(
+    private func generateWaveform(
+        from samples: [Float],
+        size: CGSize
+    ) async throws -> CGImage {
+        // Create context with error handling
+        guard let context = CGContext(
             data: nil,
             width: Int(size.width),
             height: Int(size.height),
@@ -475,36 +519,28 @@ class AudioProcessor: BaseConverter {
             bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        )
-        
-        guard let context else { return nil }
-        
-        context.setFillColor(NSColor.clear.cgColor)
-        context.fill(CGRect(origin: .zero, size: size))
-        
-        let sampleCount = samples.count
-        let samplesPerPixel = sampleCount / Int(size.width)
-        let midY = size.height / 2
-        
-        context.setStrokeColor(NSColor.systemBlue.cgColor)
-        context.setLineWidth(1.0)
-        
-        for x in 0..<Int(size.width) {
-            let startSample = x * samplesPerPixel
-            let endSample = min(startSample + samplesPerPixel, sampleCount)
-            
-            if startSample < endSample {
-                let sampleSlice = samples[startSample..<endSample]
-                let amplitude = sampleSlice.reduce(0) { max($0, abs($1)) }
-                let height = amplitude * Float(size.height / 2)
-                
-                context.move(to: CGPoint(x: CGFloat(x), y: midY - CGFloat(height)))
-                context.addLine(to: CGPoint(x: CGFloat(x), y: midY + CGFloat(height)))
-                context.strokePath()
-            }
+        ) else {
+            throw ConversionError.conversionFailed(reason: "Failed to create graphics context")
         }
         
-        return context.makeImage()
+        // Process samples in chunks to avoid memory issues
+        let chunkSize = 1024
+        let samplesPerPixel = max(1, samples.count / Int(size.width))
+        
+        // Use the visualizer to process the waveform
+        try await visualizer.processWaveform(
+            samples: samples,
+            context: context,
+            size: size,
+            chunkSize: chunkSize,
+            samplesPerPixel: samplesPerPixel
+        )
+        
+        guard let image = context.makeImage() else {
+            throw ConversionError.conversionFailed(reason: "Failed to create waveform image")
+        }
+        
+        return image
     }
     
     override func validateConversion(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {
@@ -648,5 +684,15 @@ class AudioProcessor: BaseConverter {
             metadata: nil
         )
     }
+    
+    private func checkStrategySupport(_ strategy: ConversionStrategy) async -> Bool {
+        switch strategy {
+        case .direct:
+            return true
+        case .visualize:
+            return visualizer != nil
+        default:
+            return false
+        }
+    }
 }
-

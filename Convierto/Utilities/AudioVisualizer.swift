@@ -522,4 +522,159 @@ class AudioVisualizer {
         audioInput.markAsFinished()
         reader.cancelReading()
     }
+    
+    private func processWaveformChunk(
+        _ samples: ArraySlice<Float>,
+        context: CGContext,
+        samplesPerPixel: Int,
+        size: CGSize,
+        style: WaveformStyle
+    ) {
+        let midY = size.height / 2
+        let amplitudeScale = size.height / 3
+        let xScale = size.width / CGFloat(samples.count)
+        
+        // Set up drawing style
+        context.setLineWidth(2.0)
+        context.setStrokeColor(colorPalette[0])
+        context.setAlpha(0.8)
+        
+        switch style {
+        case .line:
+            drawLineStyle(samples, context: context, midY: midY, amplitudeScale: amplitudeScale, xScale: xScale)
+        case .bars:
+            drawBarsStyle(samples, context: context, midY: midY, amplitudeScale: amplitudeScale, xScale: xScale)
+        case .filled:
+            drawFilledStyle(samples, context: context, midY: midY, amplitudeScale: amplitudeScale, xScale: xScale)
+        case .dots:
+            drawDotsStyle(samples, context: context, midY: midY, amplitudeScale: amplitudeScale, xScale: xScale)
+        }
+    }
+    
+    private func drawLineStyle(
+        _ samples: ArraySlice<Float>,
+        context: CGContext,
+        midY: CGFloat,
+        amplitudeScale: CGFloat,
+        xScale: CGFloat
+    ) {
+        let path = CGMutablePath()
+        var firstPoint = true
+        
+        for (index, sample) in samples.enumerated() {
+            let x = CGFloat(index) * xScale
+            let amplitude = CGFloat(abs(sample)) * amplitudeScale
+            
+            if firstPoint {
+                path.move(to: CGPoint(x: x, y: midY))
+                firstPoint = false
+            }
+            path.addLine(to: CGPoint(x: x, y: midY + amplitude))
+            path.addLine(to: CGPoint(x: x, y: midY - amplitude))
+        }
+        
+        context.addPath(path)
+        context.strokePath()
+    }
+    
+    private func drawBarsStyle(
+        _ samples: ArraySlice<Float>,
+        context: CGContext,
+        midY: CGFloat,
+        amplitudeScale: CGFloat,
+        xScale: CGFloat
+    ) {
+        for (index, sample) in samples.enumerated() {
+            let x = CGFloat(index) * xScale
+            let amplitude = CGFloat(abs(sample)) * amplitudeScale
+            
+            let path = CGMutablePath()
+            path.move(to: CGPoint(x: x, y: midY - amplitude))
+            path.addLine(to: CGPoint(x: x, y: midY + amplitude))
+            
+            context.addPath(path)
+            context.strokePath()
+        }
+    }
+    
+    private func drawFilledStyle(
+        _ samples: ArraySlice<Float>,
+        context: CGContext,
+        midY: CGFloat,
+        amplitudeScale: CGFloat,
+        xScale: CGFloat
+    ) {
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: 0, y: midY))
+        
+        // Draw top half
+        for (index, sample) in samples.enumerated() {
+            let x = CGFloat(index) * xScale
+            let amplitude = CGFloat(abs(sample)) * amplitudeScale
+            path.addLine(to: CGPoint(x: x, y: midY + amplitude))
+        }
+        
+        // Draw bottom half
+        for (index, sample) in samples.enumerated().reversed() {
+            let x = CGFloat(index) * xScale
+            let amplitude = CGFloat(abs(sample)) * amplitudeScale
+            path.addLine(to: CGPoint(x: x, y: midY - amplitude))
+        }
+        
+        path.closeSubpath()
+        context.addPath(path)
+        context.setAlpha(0.3)
+        context.fillPath()
+    }
+    
+    private func drawDotsStyle(
+        _ samples: ArraySlice<Float>,
+        context: CGContext,
+        midY: CGFloat,
+        amplitudeScale: CGFloat,
+        xScale: CGFloat
+    ) {
+        for (index, sample) in samples.enumerated() {
+            let x = CGFloat(index) * xScale
+            let amplitude = CGFloat(abs(sample)) * amplitudeScale
+            
+            let dotSize: CGFloat = 3.0
+            let topDot = CGRect(
+                x: x - dotSize/2,
+                y: midY + amplitude - dotSize/2,
+                width: dotSize,
+                height: dotSize
+            )
+            let bottomDot = CGRect(
+                x: x - dotSize/2,
+                y: midY - amplitude - dotSize/2,
+                width: dotSize,
+                height: dotSize
+            )
+            
+            context.fillEllipse(in: topDot)
+            context.fillEllipse(in: bottomDot)
+        }
+    }
+    
+    func processWaveform(
+        samples: [Float],
+        context: CGContext,
+        size: CGSize,
+        chunkSize: Int,
+        samplesPerPixel: Int
+    ) {
+        for chunk in stride(from: 0, to: samples.count, by: chunkSize) {
+            autoreleasepool {
+                let end = min(chunk + chunkSize, samples.count)
+                processWaveformChunk(
+                    samples[chunk..<end],
+                    context: context,
+                    samplesPerPixel: samplesPerPixel,
+                    size: size,
+                    style: .line // or whatever default style you prefer
+                )
+            }
+        }
+    }
 }
