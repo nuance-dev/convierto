@@ -15,14 +15,14 @@ class VideoProcessor: BaseConverter {
     private let imageProcessor: ImageProcessor
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Convierto", category: "VideoProcessor")
     
-    required init(settings: ConversionSettings = ConversionSettings()) {
+    required init(settings: ConversionSettings = ConversionSettings()) throws {
         self.audioVisualizer = AudioVisualizer(size: CGSize(width: 1920, height: 1080))
-        self.imageProcessor = ImageProcessor(settings: settings)
-        super.init(settings: settings)
+        self.imageProcessor = try ImageProcessor(settings: settings)
+        try super.init(settings: settings)
     }
     
-    convenience init(settings: ConversionSettings = ConversionSettings(), factory: ProcessorFactory? = nil) {
-        self.init(settings: settings)
+    convenience init(settings: ConversionSettings = ConversionSettings(), factory: ProcessorFactory? = nil) throws {
+        try self.init(settings: settings)
         self.processorFactory = factory
     }
     
@@ -106,9 +106,11 @@ class VideoProcessor: BaseConverter {
         logger.debug("📂 Created temporary output URL: \(outputPath)")
         
         let isAudioOnly = format.conforms(to: .audio)
-        guard let exportSession = try await createExportSession(for: asset, outputFormat: format, isAudioOnly: isAudioOnly) else {
-            logger.error("❌ Failed to create export session")
-            throw ConversionError.conversionFailed(reason: "Failed to create export session")
+        guard let exportSession = try? AVAssetExportSession(
+            asset: asset, 
+            presetName: settings.videoQuality
+        ) else {
+            throw ConversionError.exportFailed(reason: "Failed to create export session")
         }
         logger.debug("✅ Created export session")
         
@@ -183,7 +185,7 @@ class VideoProcessor: BaseConverter {
         let outputURL = try CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "jpg")
         let nsImage = NSImage(cgImage: imageRef, size: NSSize(width: imageRef.width, height: imageRef.height))
         
-        let imageProcessor = ImageProcessor()
+        let imageProcessor = try ImageProcessor()
         try await imageProcessor.saveImage(
             nsImage,
             format: format,
@@ -515,7 +517,6 @@ class VideoProcessor: BaseConverter {
         // Set up conversion buffers
         let bufferSize = 32768
         var inputBuffer = [UInt8](repeating: 0, count: bufferSize)
-        
         var audioBufferData = AudioBufferData(
             data: &inputBuffer,
             size: bufferSize
@@ -590,7 +591,7 @@ class VideoProcessor: BaseConverter {
         }
         
         // Directly modify the AudioBufferList instead of using UnsafeMutableAudioBufferListPointer
-        ioData.pointee.mBuffers.mData = audioData.data
+        ioData.pointee.mBuffers.mData = UnsafeMutableRawPointer(audioData.data)
         ioData.pointee.mBuffers.mDataByteSize = UInt32(audioData.size)
         ioData.pointee.mBuffers.mNumberChannels = 2
         
@@ -599,7 +600,12 @@ class VideoProcessor: BaseConverter {
     
     // Add this struct to store audio buffer data
     private struct AudioBufferData {
-        var data: UnsafeMutableRawPointer
+        var data: UnsafeMutablePointer<UInt8>
         var size: Int
+        
+        init(data: UnsafeMutablePointer<UInt8>, size: Int) {
+            self.data = data
+            self.size = size
+        }
     }
 }

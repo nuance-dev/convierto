@@ -16,60 +16,104 @@ class BaseConverter: MediaConverting {
     let settings: ConversionSettings
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Convierto", category: "BaseConverter")
     
-    required init(settings: ConversionSettings = ConversionSettings()) {
+    // Memory requirements in bytes for different conversion types
+    private struct MemoryRequirements {
+        static let base: UInt64 = 100_000_000 // 100MB
+        static let videoProcessing: UInt64 = 500_000_000 // 500MB
+        static let imageToVideo: UInt64 = 250_000_000 // 250MB
+    }
+    
+    required init(settings: ConversionSettings = ConversionSettings()) throws {
         self.settings = settings
+        
+        // Validate settings
+        guard settings.videoBitRate > 0 else {
+            throw ConversionError.invalidConfiguration("Video bitrate must be positive")
+        }
+        guard settings.audioBitRate > 0 else {
+            throw ConversionError.invalidConfiguration("Audio bitrate must be positive")
+        }
+        
+        logger.debug("Initialized BaseConverter with settings: \(String(describing: settings))")
     }
     
+    /// Base implementation - must be overridden by subclasses
     func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
-        throw ConversionError.conversionFailed(reason: "Base converter cannot perform conversions")
+        fatalError("convert(_:to:metadata:progress:) must be overridden by subclass")
     }
     
+    /// Base implementation - must be overridden by subclasses
     func canConvert(from: UTType, to: UTType) -> Bool {
-        return false // Base implementation returns false, subclasses should override
+        fatalError("canConvert(from:to:) must be overridden by subclass")
     }
     
     func getAVFileType(for format: UTType) -> AVFileType {
-        switch format {
-        case .mpeg4Movie:
-            return .mp4
-        case .quickTimeMovie:
-            return .mov
-        case .mp3:
-            return .mp3
-        case .wav:
-            return .wav
-        case .m4a, .aac, .mpeg4Audio:
-            return .m4a
-        default:
-            return .mp4
-        }
+        logger.debug("Determining AVFileType for format: \(format.identifier)")
+        
+        let fileType: AVFileType = {
+            switch format {
+            case .mpeg4Movie:
+                return .mp4 // Standard MP4 container
+            case .quickTimeMovie:
+                return .mov // Apple QuickTime format
+            case .mp3:
+                return .mp3 // MPEG Layer-3 Audio
+            case .wav:
+                return .wav // Waveform Audio
+            case .m4a, .aac, .mpeg4Audio:
+                return .m4a // MPEG-4 Audio
+            default:
+                logger.warning("Unknown format, defaulting to MP4: \(format.identifier)")
+                return .mp4
+            }
+        }()
+        
+        logger.debug("Selected AVFileType: \(fileType.rawValue)")
+        return fileType
     }
     
     func createExportSession(
         for asset: AVAsset,
         outputFormat: UTType,
         isAudioOnly: Bool = false
-    ) async throws -> AVAssetExportSession? {
+    ) async throws -> AVAssetExportSession {
         let presetName = isAudioOnly ? AVAssetExportPresetAppleM4A : settings.videoQuality
+        logger.debug("Creating export session with preset: \(presetName)")
+        
         guard let exportSession = AVAssetExportSession(asset: asset, presetName: presetName) else {
-            throw ConversionError.conversionFailed(reason: "Failed to create export session")
+            logger.error("Failed to create export session with preset: \(presetName)")
+            throw ConversionError.conversionFailed(reason: "Failed to create export session with preset: \(presetName)")
         }
+        
+        // Validate supported file types
+        guard exportSession.supportedFileTypes.contains(getAVFileType(for: outputFormat)) else {
+            logger.error("Export session doesn't support output format: \(outputFormat.identifier)")
+            throw ConversionError.unsupportedFormat(format: outputFormat)
+        }
+        
         return exportSession
     }
     
     func createAudioMix(for asset: AVAsset) async throws -> AVAudioMix? {
         guard let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first else {
+            logger.debug("No audio track found in asset")
             return nil
         }
+        
+        logger.debug("Creating audio mix for track: \(audioTrack)")
         
         let audioMix = AVMutableAudioMix()
         let parameters = AVMutableAudioMixInputParameters(track: audioTrack)
         
+        // Configure audio parameters based on settings
         parameters.audioTimePitchAlgorithm = .spectral
-        parameters.setVolumeRamp(fromStartVolume: 1.0, 
-                               toEndVolume: 1.0, 
-                               timeRange: CMTimeRange(start: .zero, 
-                                                    duration: try await asset.load(.duration)))
+        let duration = try await asset.load(.duration)
+        
+        parameters.setVolumeRamp(
+            fromStartVolume: settings.audioStartVolume,
+            toEndVolume: settings.audioEndVolume,
+            timeRange: CMTimeRange(start: .zero, duration: duration)
+        )
         
         audioMix.inputParameters = [parameters]
         return audioMix

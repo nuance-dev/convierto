@@ -27,6 +27,17 @@ public struct ConversionSettings {
     var gifFrameDuration: Double = 0.1
     var animationStyle: AnimationStyle = .none
     
+    // Audio mixing settings
+    var audioStartVolume: Float = 1.0
+    var audioEndVolume: Float = 1.0
+    
+    // Memory thresholds
+    var memoryThresholdPercentage: Double = 0.5 // Use up to 50% of available memory
+    
+    // Validation thresholds
+    var minimumVideoBitRate: Int = 100_000    // 100 Kbps
+    var minimumAudioBitRate: Int = 64_000     // 64 Kbps
+    
     public enum AnimationStyle {
         case none
         case zoom

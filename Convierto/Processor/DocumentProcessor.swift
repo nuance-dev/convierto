@@ -12,10 +12,10 @@ class DocumentProcessor: BaseConverter {
     private let maxPageBufferSize: UInt64 = 100 * 1024 * 1024 // 100MB per page
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Convierto", category: "DocumentProcessor")
     
-    required init(settings: ConversionSettings = ConversionSettings()) {
+    required init(settings: ConversionSettings = ConversionSettings()) throws {
         self.resourcePool = ResourcePool.shared
-        self.imageProcessor = ImageProcessor(settings: settings)
-        super.init(settings: settings)
+        self.imageProcessor = try ImageProcessor(settings: settings)
+        try super.init(settings: settings)
     }
     
     override func canConvert(from: UTType, to: UTType) -> Bool {

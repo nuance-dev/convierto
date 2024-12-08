@@ -2,33 +2,96 @@ import Foundation
 import UniformTypeIdentifiers
 import os.log
 import AppKit
+import Combine
 
 class ConversionCoordinator: NSObject {
     private let queue = OperationQueue()
     private let maxRetries = 3
     private let resourceManager = ResourceManager.shared
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Convierto", category: "ConversionCoordinator")
+    private var cancellables = Set<AnyCancellable>()
     
-    override init() {
+    // Configuration
+    private let settings: ConversionSettings
+    
+    init(settings: ConversionSettings = ConversionSettings()) {
+        self.settings = settings
         super.init()
-        queue.maxConcurrentOperationCount = 1
+        setupQueue()
         setupQueueMonitoring()
     }
     
+    private func setupQueue() {
+        queue.maxConcurrentOperationCount = 1  // Serial queue for predictable resource usage
+        queue.qualityOfService = .userInitiated
+    }
+    
     private func setupQueueMonitoring() {
-        queue.addObserver(self, forKeyPath: "operationCount", options: .new, context: nil)
+        // Use Combine to monitor queue operations
+        queue.publisher(for: \.operationCount)
+            .filter { $0 == 0 }
+            .debounce(for: .seconds(0.5), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.handleQueueEmpty()
+            }
+            .store(in: &cancellables)
     }
     
-    override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
-        if keyPath == "operationCount" {
-            handleQueueCountChange()
+    private func handleQueueEmpty() {
+        Task {
+            await performCleanup()
         }
     }
     
-    private func handleQueueCountChange() {
-        if queue.operationCount == 0 {
-            resourceManager.cleanup()
+    private func performCleanup() async {
+        logger.debug("🧹 Starting cleanup process")
+        // Make sure cleanup is actually async
+        try? await Task.sleep(nanoseconds: 100_000)  // Small delay to ensure async context
+        await resourceManager.cleanup()
+        logger.debug("✅ Cleanup completed")
+    }
+    
+    private func performConversion(
+        url: URL,
+        to outputFormat: UTType,
+        metadata: ConversionMetadata,
+        progress: Progress
+    ) async throws -> ProcessingResult {
+        logger.debug("⚙️ Starting conversion process")
+        
+        // Determine input type
+        let resourceValues = try url.resourceValues(forKeys: [.contentTypeKey])
+        guard let inputType = resourceValues.contentType else {
+            throw ConversionError.invalidInputType
         }
+        
+        // Validate conversion compatibility
+        let converter = try await createConverter(for: inputType, targetFormat: outputFormat)
+        
+        // Perform the conversion
+        logger.debug("🔄 Converting from \(inputType.identifier) to \(outputFormat.identifier)")
+        let result = try await converter.convert(url, to: outputFormat, metadata: metadata, progress: progress)
+        
+        logger.debug("✅ Conversion completed successfully")
+        return result
+    }
+    
+    private func createConverter(
+        for inputType: UTType,
+        targetFormat: UTType
+    ) async throws -> MediaConverting {
+        // Select appropriate converter based on input and output types
+        if inputType.conforms(to: .image) && targetFormat.conforms(to: .image) {
+            return try ImageProcessor(settings: settings)
+        } else if inputType.conforms(to: .audiovisualContent) || targetFormat.conforms(to: .audiovisualContent) {
+            return try VideoProcessor(settings: settings)
+        } else if inputType.conforms(to: .audio) || targetFormat.conforms(to: .audio) {
+            return try AudioProcessor(settings: settings)
+        } else if inputType.conforms(to: .pdf) || targetFormat.conforms(to: .pdf) {
+            return try DocumentProcessor(settings: settings)
+        }
+        
+        throw ConversionError.unsupportedConversion("No converter available for \(inputType.identifier) to \(targetFormat.identifier)")
     }
     
     func convert(
@@ -38,135 +101,97 @@ class ConversionCoordinator: NSObject {
         progress: Progress
     ) async throws -> ProcessingResult {
         let contextId = UUID().uuidString
+        logger.debug("🎬 Starting conversion process (Context: \(contextId))")
+        
+        // Track conversion context
         resourceManager.trackContext(contextId)
         
         defer {
+            logger.debug("🔄 Cleaning up conversion context: \(contextId)")
             resourceManager.releaseContext(contextId)
-            GraphicsContextManager.shared.releaseContext(for: contextId)
         }
         
-        do {
-            let result = try await withRetries(maxRetries: maxRetries) { [weak self] in
+        // Validate input before proceeding
+        try await validateInput(url: url, targetFormat: outputFormat)
+        
+        return try await withRetries(
+            maxRetries: maxRetries,
+            operation: { [weak self] in
                 guard let self = self else {
                     throw ConversionError.conversionFailed(reason: "Coordinator was deallocated")
                 }
+                
                 return try await self.performConversion(
                     url: url,
                     to: outputFormat,
                     metadata: metadata,
                     progress: progress
                 )
-            }
-            return result
-        } catch {
-            logger.error("Conversion failed: \(error.localizedDescription)")
-            throw error
-        }
-    }
-    
-    private func createMetadata(for url: URL) async throws -> ConversionMetadata {
-        let resourceValues = try url.resourceValues(forKeys: [
-            .contentTypeKey,
-            .nameKey,
-            .fileSizeKey,
-            .creationDateKey,
-            .contentModificationDateKey
-        ])
-        
-        return ConversionMetadata(
-            originalFileName: resourceValues.name,
-            originalFileType: resourceValues.contentType,
-            creationDate: resourceValues.creationDate,
-            modificationDate: resourceValues.contentModificationDate,
-            fileSize: Int64(resourceValues.fileSize ?? 0)
+            },
+            retryDelay: 1.0
         )
     }
     
-    private func cleanup() {
-        resourceManager.cleanup()
-        GraphicsContextManager.shared.releaseAllContexts()
-        queue.cancelAllOperations()
+    private func validateInput(url: URL, targetFormat: UTType) async throws {
+        logger.debug("🔍 Validating input parameters")
+        
+        // Check if file exists and is readable
+        guard FileManager.default.isReadableFile(atPath: url.path) else {
+            throw ConversionError.fileAccessDenied(path: url.path)
+        }
+        
+        // Validate file size
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let fileSize = attributes[.size] as? UInt64 ?? 0
+        
+        // Check available memory
+        let available = await ResourcePool.shared.getAvailableMemory()
+        guard available >= fileSize * 2 else { // Require 2x file size as buffer
+            throw ConversionError.insufficientMemory(
+                required: fileSize * 2,
+                available: available
+            )
+        }
+        
+        logger.debug("✅ Input validation successful")
     }
     
-    private func withRetries<T>(maxRetries: Int, operation: @escaping () async throws -> T) async throws -> T {
+    private func withRetries<T>(
+        maxRetries: Int,
+        operation: @escaping () async throws -> T,
+        retryDelay: TimeInterval
+    ) async throws -> T {
         var lastError: Error?
         
         for attempt in 0..<maxRetries {
             do {
                 if attempt > 0 {
-                    let delay = UInt64(pow(2.0, Double(attempt))) * 1_000_000_000
-                    logger.debug("Retry attempt \(attempt + 1) after \(delay/1_000_000_000) seconds")
-                    try await Task.sleep(nanoseconds: delay)
+                    let delay = calculateRetryDelay(attempt: attempt, baseDelay: retryDelay)
+                    logger.debug("⏳ Retry attempt \(attempt + 1) after \(delay) seconds")
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 }
+                
                 return try await operation()
+            } catch let error as ConversionError {
+                lastError = error
+                logger.error("❌ Attempt \(attempt + 1) failed: \(error.localizedDescription)")
+                
+                // Don't retry certain errors
+                if case .invalidInput = error { throw error }
+                if case .insufficientMemory = error { throw error }
             } catch {
                 lastError = error
-                logger.error("Attempt \(attempt + 1) failed: \(error.localizedDescription)")
-                resourceManager.cleanup()
+                logger.error("❌ Unexpected error in attempt \(attempt + 1): \(error.localizedDescription)")
             }
         }
         
-        logger.error("All retry attempts failed")
+        logger.error("❌ All retry attempts failed")
         throw lastError ?? ConversionError.conversionFailed(reason: "Max retries exceeded")
     }
     
-    private func performConversion(
-        url: URL,
-        to outputFormat: UTType,
-        metadata: ConversionMetadata,
-        progress: Progress
-    ) async throws -> ProcessingResult {
-        logger.debug("🎬 Starting conversion process")
-        logger.debug("📂 Source: \(url.path)")
-        logger.debug("🎯 Target format: \(outputFormat.identifier)")
-        
-        logger.debug("🔍 Determining input type")
-        let resourceValues = try url.resourceValues(forKeys: [.contentTypeKey])
-        guard let inputType = resourceValues.contentType else {
-            logger.error("❌ Failed to determine input type")
-            throw ConversionError.invalidInputType
-        }
-        
-        logger.debug("✅ Input type determined: \(inputType.identifier)")
-        
-        // Handle different conversion types with detailed logging
-        if inputType.conforms(to: .audio) && outputFormat.conforms(to: .audiovisualContent) {
-            logger.debug("🎵 Initiating audio-to-video conversion")
-            let audioProcessor = AudioProcessor()
-            logger.debug("✅ Audio processor created")
-            return try await audioProcessor.convert(
-                url,
-                to: outputFormat,
-                metadata: metadata,
-                progress: progress
-            )
-        } else if inputType.conforms(to: .image) && outputFormat.conforms(to: .image) {
-            logger.debug("🎨 Initiating image-to-image conversion")
-            let imageProcessor = ImageProcessor()
-            logger.debug("✅ Image processor created")
-            return try await imageProcessor.processImage(url, to: outputFormat, metadata: metadata, progress: progress)
-} else if inputType.conforms(to: .image) && outputFormat.conforms(to: .movie) {
-    logger.debug("🎬 Initiating image-to-video conversion")
-            let videoProcessor = VideoProcessor()
-            logger.debug("✅ Video processor created")
-            
-    guard NSImage(contentsOf: url) != nil else {
-                logger.error("❌ Failed to load image from URL")
-                throw ConversionError.invalidInput
-            }
-            logger.debug("✅ Image loaded successfully")
-            
-            return try await videoProcessor.convert(
-                url,
-                to: outputFormat,
-                metadata: metadata,
-                progress: progress
-            )
-        }
-        
-        logger.error("❌ Unsupported conversion combination")
-        logger.debug("📄 Input type: \(inputType.identifier)")
-        logger.debug("🎯 Output type: \(outputFormat.identifier)")
-        throw ConversionError.conversionNotPossible(reason: "Unsupported conversion type")
+    private func calculateRetryDelay(attempt: Int, baseDelay: TimeInterval) -> TimeInterval {
+        let maxDelay: TimeInterval = 30.0 // Maximum delay of 30 seconds
+        let delay = baseDelay * pow(2.0, Double(attempt))
+        return min(delay, maxDelay)
     }
 } 

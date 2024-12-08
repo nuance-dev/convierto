@@ -92,4 +92,10 @@ class GraphicsContextManager {
         
         logger.debug("Memory pressure handled: released \(sortedContexts.count - 1) contexts")
     }
+    
+    func releaseContextSync(for key: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        contexts.removeValue(forKey: key)
+    }
 }

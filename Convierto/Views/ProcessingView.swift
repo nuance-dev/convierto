@@ -144,6 +144,7 @@ struct ProcessingView: View {
         case .finalizing: return "checkmark.circle"
         case .completed: return "checkmark.circle.fill"
         case .failed: return "xmark.circle"
+        case .preparing: return "gear"
         }
     }
     
@@ -156,6 +157,7 @@ struct ProcessingView: View {
         case .finalizing: return "Finalizing..."
         case .completed: return "Completed"
         case .failed: return "Failed"
+        case .preparing: return "Preparing..."
         }
     }
 }
@@ -164,7 +166,7 @@ struct ProcessingView: View {
 extension ConversionStage {
     var shouldAnimate: Bool {
         switch self {
-        case .idle, .analyzing, .converting, .optimizing, .finalizing:
+        case .idle, .analyzing, .converting, .optimizing, .finalizing, .preparing:
             return true
         case .completed, .failed:
             return false

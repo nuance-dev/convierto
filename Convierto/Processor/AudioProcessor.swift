@@ -16,13 +16,13 @@ class AudioProcessor: BaseConverter {
     private let progressTracker: ProgressTracker
     private let config: AudioProcessorConfig
     
-    required init(settings: ConversionSettings = ConversionSettings()) {
+    required init(settings: ConversionSettings = ConversionSettings()) throws {
         self.config = .default
         self.resourcePool = ResourcePool.shared
         self.visualizer = AudioVisualizer(size: config.waveformSize)
-        self.imageProcessor = ImageProcessor(settings: settings)
+        self.imageProcessor = try ImageProcessor(settings: settings)
         self.progressTracker = ProgressTracker()
-        super.init(settings: settings)
+        try super.init(settings: settings)
     }
     
     init(settings: ConversionSettings = ConversionSettings(), 
@@ -39,9 +39,9 @@ class AudioProcessor: BaseConverter {
         
         self.resourcePool = ResourcePool.shared
         self.visualizer = AudioVisualizer(size: config.waveformSize)
-        self.imageProcessor = ImageProcessor(settings: settings)
+        self.imageProcessor = try ImageProcessor(settings: settings)
         self.progressTracker = ProgressTracker()
-        super.init(settings: settings)
+        try super.init(settings: settings)
     }
     
     override func canConvert(from: UTType, to: UTType) -> Bool {
@@ -57,119 +57,76 @@ class AudioProcessor: BaseConverter {
     
     override func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
         // Add stage notification at the start
-        await MainActor.run {
-            NotificationCenter.default.post(
-                name: .processingStageChanged,
-                object: nil,
-                userInfo: ["stage": ConversionStage.analyzing]
-            )
-        }
+        await updateConversionStage(.analyzing)
         
         logger.debug("🎵 Starting audio conversion process")
         logger.debug("📂 Input file: \(url.path)")
         logger.debug("🎯 Target format: \(format.identifier)")
         
-        // Validate settings
-        guard settings.videoBitRate > 0 else {
-            throw ConversionError.conversionFailed(reason: "Invalid video bitrate configuration")
-        }
-        
-        guard settings.audioBitRate > 0 else {
-            throw ConversionError.conversionFailed(reason: "Invalid audio bitrate configuration")
-        }
-        
-        let taskId = UUID()
-        logger.debug("🔑 Task ID: \(taskId.uuidString)")
-        
-        // Create a cleanup task that will run after conversion
-        defer {
-            Task {
-                await resourcePool.endTask(id: taskId)
-                logger.debug("🧹 Cleanup completed for task: \(taskId.uuidString)")
-            }
-        }
-        
-        await resourcePool.beginTask(id: taskId, type: .audio)
-        
         do {
-            let asset = AVAsset(url: url)
-            try await asset.load(.tracks)
-            logger.debug("📼 Asset created successfully")
-            
-            // Update stage to analyzing
-            await MainActor.run {
-                NotificationCenter.default.post(
-                    name: .processingStageChanged,
-                    object: nil,
-                    userInfo: ["stage": ConversionStage.analyzing]
-                )
+            // Validate input early
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw ConversionError.invalidInput
             }
             
-            try await validateAudioAsset(asset)
-            logger.debug("✅ Asset validation passed")
+            let taskId = UUID()
+            logger.debug("🔑 Starting conversion task: \(taskId.uuidString)")
             
-            try await resourcePool.checkResourceAvailability(taskId: taskId, type: .audio)
-            logger.debug("✅ Resource availability confirmed")
-            
-            let strategy = try await determineConversionStrategy(from: asset, to: format)
-            logger.debug("⚙️ Conversion strategy determined: \(String(describing: strategy))")
-            
-            let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
-            await resourcePool.markFileAsActive(outputURL)
-            
-            defer {
-                Task {
-                    await resourcePool.markFileAsInactive(outputURL)
+            // Resource management using structured concurrency
+            return try await withThrowingTaskGroup(of: ProcessingResult.self) { group in
+                let result = try await group.addTask {
+                    await self.resourcePool.beginTask(id: taskId, type: .audio)
+                    defer {
+                        Task {
+                            await self.resourcePool.endTask(id: taskId)
+                        }
+                    }
+                    
+                    let asset = AVAsset(url: url)
+                    try await self.validateAudioAsset(asset)
+                    
+                    await self.updateConversionStage(.preparing)
+                    
+                    let strategy = try await self.determineConversionStrategy(from: asset, to: format)
+                    let outputURL = try await CacheManager.shared.createTemporaryURL(for: format.preferredFilenameExtension ?? "mp4")
+                    
+                    await self.updateConversionStage(.converting)
+                    
+                    let conversionResult = try await self.withTimeout(seconds: 300) {
+                        try await self.executeConversion(
+                            asset: asset,
+                            to: outputURL,
+                            format: format,
+                            strategy: strategy,
+                            progress: progress,
+                            metadata: metadata
+                        )
+                    }
+                    
+                    await self.updateConversionStage(.optimizing)
+                    
+                    guard FileManager.default.fileExists(atPath: conversionResult.outputURL.path) else {
+                        throw ConversionError.exportFailed(reason: "Output file not found")
+                    }
+                    
+                    await self.updateConversionStage(.completed)
+                    return conversionResult
                 }
+                
+                // Wait for the task to complete and get its result
+                let finalResult = try await group.next()
+                guard let result = finalResult else {
+                    throw ConversionError.conversionFailed(reason: "Task group completed without result")
+                }
+                return result
             }
             
-            // Update stage to converting
-            await MainActor.run {
-                NotificationCenter.default.post(
-                    name: .processingStageChanged,
-                    object: nil,
-                    userInfo: ["stage": ConversionStage.converting]
-                )
-            }
-            
-            let result = try await withTimeout(seconds: 300) {
-                logger.debug("⏳ Starting conversion with 300s timeout")
-                return try await self.executeConversion(
-                    asset: asset,
-                    to: outputURL,
-                    format: format,
-                    strategy: strategy,
-                    progress: progress,
-                    metadata: metadata
-                )
-            }
-            
-            // Update stage to finishing
-            await MainActor.run {
-                NotificationCenter.default.post(
-                    name: .processingStageChanged,
-                    object: nil,
-                    userInfo: ["stage": ConversionStage.optimizing]
-                )
-            }
-            
-            logger.debug("✅ Conversion completed successfully")
-            
-            // Update stage to completed
-            await MainActor.run {
-                NotificationCenter.default.post(
-                    name: .processingStageChanged,
-                    object: nil,
-                    userInfo: ["stage": ConversionStage.completed]
-                )
-            }
-            
-            return result
-            
-        } catch let conversionError as ConversionError {
-            logger.error("❌ Conversion failed: \(conversionError.localizedDescription)")
-            throw conversionError
+        } catch let error as ConversionError {
+            await updateConversionStage(.failed)
+            logger.error("❌ Conversion failed: \(error.localizedDescription)")
+            throw error
         } catch {
+            await updateConversionStage(.failed)
             logger.error("❌ Unexpected error: \(error.localizedDescription)")
             throw ConversionError.conversionFailed(reason: error.localizedDescription)
         }
@@ -277,24 +234,23 @@ class AudioProcessor: BaseConverter {
         let composition = AVMutableComposition()
         
         // Add audio track to composition
-        guard let audioTrack = try await asset.loadTracks(withMediaType: .audio).first,
-              let compositionAudioTrack = composition.addMutableTrack(
-                withMediaType: .audio,
-                preferredTrackID: kCMPersistentTrackID_Invalid
-              ) else {
+        if let audioTrack = try await asset.loadTracks(withMediaType: .audio).first,
+           let compositionAudioTrack = composition.addMutableTrack(
+               withMediaType: .audio,
+               preferredTrackID: kCMPersistentTrackID_Invalid
+           ) {
+            let timeRange = CMTimeRange(start: .zero, duration: try await asset.load(.duration))
+            try compositionAudioTrack.insertTimeRange(timeRange, of: audioTrack, at: .zero)
+        } else {
             throw ConversionError.conversionFailed(reason: "Failed to create audio track")
         }
         
-        let timeRange = CMTimeRange(start: .zero, duration: try await asset.load(.duration))
-        try compositionAudioTrack.insertTimeRange(timeRange, of: audioTrack, at: .zero)
-        
         // Create export session with composition
-        guard let exportSession = try await createExportSession(
-            for: composition,
-            outputFormat: format,
-            isAudioOnly: true
+        guard let exportSession = try? await AVAssetExportSession(
+            asset: asset,
+            presetName: settings.videoQuality
         ) else {
-            throw ConversionError.exportFailed(reason: "Export session failed to complete")
+            throw ConversionError.exportFailed(reason: "Failed to create export session")
         }
         
         exportSession.outputURL = outputURL
@@ -330,6 +286,8 @@ class AudioProcessor: BaseConverter {
         let videoFormat = UTType.mpeg4Movie
         
         logger.debug("🎨 Creating audio visualization with format: \(videoFormat.identifier)")
+        
+        let writer = try AVAssetWriter(url: outputURL, fileType: .mp4)
         
         // Store the URL in a property to prevent cleanup
         let tempURL = outputURL
@@ -485,17 +443,22 @@ class AudioProcessor: BaseConverter {
         var samples: [Float] = []
         while let buffer = output.copyNextSampleBuffer() {
             if let audioBuffer = CMSampleBufferGetDataBuffer(buffer) {
-                var length = 0
-                var dataPointer: UnsafeMutablePointer<Int8>?
-                CMBlockBufferGetDataPointer(audioBuffer, atOffset: 0, lengthAtOffsetOut: &length, totalLengthOut: nil, dataPointerOut: &dataPointer)
-                
-                let int16Pointer = UnsafeBufferPointer(
-                    start: UnsafeRawPointer(dataPointer)?.assumingMemoryBound(to: Int16.self),
-                    count: length / 2
+                var blockBufferLength = 0
+                var dataPointerOut: UnsafeMutablePointer<Int8>?
+                let status = CMBlockBufferGetDataPointer(
+                    audioBuffer,
+                    atOffset: 0,
+                    lengthAtOffsetOut: &blockBufferLength,
+                    totalLengthOut: nil,
+                    dataPointerOut: &dataPointerOut
                 )
                 
-                let floatSamples = int16Pointer.map { Float($0) / Float(Int16.max) }
-                samples.append(contentsOf: floatSamples)
+                if status == kCMBlockBufferNoErr, let dataPointer = dataPointerOut {
+                    let int16Pointer = UnsafeRawPointer(dataPointer).assumingMemoryBound(to: Int16.self)
+                    let bufferPointer = UnsafeBufferPointer(start: int16Pointer, count: blockBufferLength / 2)
+                    let floatSamples = bufferPointer.map { Float($0) / Float(Int16.max) }
+                    samples.append(contentsOf: floatSamples)
+                }
             }
         }
         
@@ -570,13 +533,10 @@ class AudioProcessor: BaseConverter {
     ) async throws -> ProcessingResult {
         logger.debug("🎵 Starting audio conversion")
         
-        guard let exportSession = try await createExportSession(
+        let exportSession = try await createExportSession(
             for: asset,
-            outputFormat: format,
-            isAudioOnly: true
-        ) else {
-            throw ConversionError.exportFailed(reason: "Failed to create export session")
-        }
+            format: format
+        )
         
         exportSession.outputURL = outputURL
         exportSession.outputFileType = getAVFileType(for: format)
@@ -591,6 +551,12 @@ class AudioProcessor: BaseConverter {
             throw ConversionError.exportFailed(reason: "Export failed: \(String(describing: exportSession.error))")
         }
         
+        guard FileManager.default.fileExists(atPath: outputURL.path) else {
+            throw ConversionError.exportFailed(reason: "Output file not found")
+        }
+        
+        await updateConversionStage(.completed)
+        
         return ProcessingResult(
             outputURL: outputURL,
             originalFileName: metadata.originalFileName ?? "audio",
@@ -600,32 +566,32 @@ class AudioProcessor: BaseConverter {
         )
     }
     
-    func createPixelBuffer(from image: NSImage) throws -> CVPixelBuffer? {
-        var pixelBuffer: CVPixelBuffer?
+    func createPixelBuffer(from image: NSImage) throws -> CVPixelBuffer {
         let width = Int(image.size.width)
         let height = Int(image.size.height)
         
-        let attrs = [
-            kCVPixelBufferCGImageCompatibilityKey: kCFBooleanTrue,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: kCFBooleanTrue
-        ] as CFDictionary
+        let attributes: [String: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey as String: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
+            kCVPixelBufferMetalCompatibilityKey as String: true
+        ]
         
+        var pixelBuffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(
             kCFAllocatorDefault,
             width,
             height,
             kCVPixelFormatType_32ARGB,
-            attrs,
+            attributes as CFDictionary,
             &pixelBuffer
         )
         
         guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
-            logger.error("❌ Failed to create pixel buffer")
-            return nil
+            throw ConversionError.conversionFailed(reason: "Failed to create pixel buffer")
         }
         
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        CVPixelBufferLockBaseAddress(buffer, CVPixelBufferLockFlags(rawValue: 0))
+        defer { CVPixelBufferUnlockBaseAddress(buffer, CVPixelBufferLockFlags(rawValue: 0)) }
         
         guard let context = CGContext(
             data: CVPixelBufferGetBaseAddress(buffer),
@@ -634,10 +600,9 @@ class AudioProcessor: BaseConverter {
             bitsPerComponent: 8,
             bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
             space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+            bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         ) else {
-            logger.error("❌ Failed to create CGContext")
-            return nil
+            throw ConversionError.conversionFailed(reason: "Failed to create graphics context")
         }
         
         NSGraphicsContext.saveGraphicsState()
@@ -669,8 +634,8 @@ class AudioProcessor: BaseConverter {
         videoWriter.startWriting()
         videoWriter.startSession(atSourceTime: .zero)
         
-        if let buffer = try createPixelBuffer(from: image) {
-            adaptor.append(buffer, withPresentationTime: .zero)
+        if let pixelBuffer = try? createPixelBuffer(from: image) {
+            adaptor.append(pixelBuffer, withPresentationTime: .zero)
         }
         
         videoInput.markAsFinished()
@@ -685,14 +650,38 @@ class AudioProcessor: BaseConverter {
         )
     }
     
-    private func checkStrategySupport(_ strategy: ConversionStrategy) async -> Bool {
+    private func checkStrategySupport(_ strategy: ConversionStrategy) -> Bool {
         switch strategy {
         case .direct:
             return true
         case .visualize:
-            return visualizer != nil
+            return true
         default:
             return false
         }
+    }
+    
+    // Helper method for stage updates
+    private func updateConversionStage(_ stage: ConversionStage) async {
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: .processingStageChanged,
+                object: nil,
+                userInfo: ["stage": stage]
+            )
+        }
+    }
+    
+    private func createExportSession(for asset: AVAsset, format: UTType) async throws -> AVAssetExportSession {
+        let exportSession = try await AVAssetExportSession(
+            asset: asset,
+            presetName: settings.videoQuality
+        )
+
+        guard let session = exportSession else {
+            throw ConversionError.exportFailed(reason: "Failed to create export session")
+        }
+
+        return session
     }
 }
