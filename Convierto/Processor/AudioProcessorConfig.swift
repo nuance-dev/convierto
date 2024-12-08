@@ -4,7 +4,7 @@ struct AudioProcessorConfig {
     let maxFrameCount: Int
     let defaultFPS: Int
     let conversionTimeout: TimeInterval
-    let waveformSize: CGSize
+    var waveformSize: CGSize
     let defaultBufferSize: Int
     
     static let `default` = AudioProcessorConfig(
