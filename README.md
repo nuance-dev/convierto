@@ -2,6 +2,8 @@
 
 A powerful, native macOS app that intelligently converts files while maintaining quality. Built with SwiftUI for optimal performance and a seamless user experience.
 
+![convierto-banner](https://github.com/user-attachments/assets/df5a1c1f-bc31-4a70-bacb-f9460d0b7fb1)
+
 ## ✨ Features
 
 ### File Support
