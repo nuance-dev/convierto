@@ -83,82 +83,89 @@ struct OutputFormatSelector: View {
     let showError: Bool
     let errorMessage: String?
     
-    @State private var isHovered = false
     @State private var isMenuOpen = false
+    @State private var isHovered = false
     @Environment(\.colorScheme) var colorScheme
     
     var body: some View {
-        Menu {
-            ForEach(supportedTypes.keys.sorted(), id: \.self) { category in
-                Section {
-                    ForEach(supportedTypes[category] ?? [], id: \.identifier) { format in
-                        Button(action: {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                selectedOutputFormat = format
-                            }
-                        }) {
-                            HStack {
-                                Image(systemName: getFormatIcon(for: format))
-                                    .foregroundColor(format == selectedOutputFormat ? .accentColor : .secondary)
-                                    .font(.system(size: 14))
-                                Text(format.localizedDescription ?? format.identifier)
-                                    .font(.system(size: 14))
-                                if format == selectedOutputFormat {
-                                    Spacer()
-                                    Image(systemName: "checkmark")
-                                        .foregroundColor(.accentColor)
-                                        .font(.system(size: 12, weight: .bold))
-                                }
-                            }
-                        }
-                    }
-                } header: {
-                    Text(category)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .padding(.top, 4)
-                }
+        Button {
+            withAnimation(.spring(response: 0.3)) {
+                isMenuOpen.toggle()
             }
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: getFormatIcon(for: selectedOutputFormat))
-                    .foregroundStyle(.linearGradient(colors: [.accentColor, .accentColor.opacity(0.8)],
-                                                   startPoint: .top,
-                                                   endPoint: .bottom))
-                    .font(.system(size: 14, weight: .medium))
+            HStack(spacing: 12) {
+                // Selected Format Icon
+                ZStack {
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.15))
+                        .frame(width: 40, height: 40)
+                    
+                    Image(systemName: getFormatIcon(for: selectedOutputFormat))
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.accentColor, .accentColor.opacity(0.8)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                }
                 
-                Text(selectedOutputFormat.localizedDescription ?? selectedOutputFormat.identifier)
-                    .font(.system(size: 14, weight: .medium))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Convert to")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    Text(selectedOutputFormat.localizedDescription ?? "Select Format")
+                        .font(.system(size: 14, weight: .medium))
+                }
+                
+                Spacer()
                 
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: 12, weight: .bold))
                     .foregroundColor(.secondary)
                     .rotationEffect(.degrees(isMenuOpen ? 180 : 0))
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
             .background(
                 ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(colorScheme == .dark ? Color.black.opacity(0.3) : Color.white.opacity(0.8))
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.accentColor.opacity(isHovered ? 0.2 : 0.1), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(colorScheme == .dark ? 
+                            Color.black.opacity(0.3) : 
+                            Color.white.opacity(0.8))
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.accentColor.opacity(isHovered ? 0.2 : 0.1), 
+                               lineWidth: 1)
                 }
             )
-            .shadow(color: .accentColor.opacity(isHovered ? 0.1 : 0), radius: 8, x: 0, y: 4)
+            .shadow(
+                color: .accentColor.opacity(isHovered ? 0.1 : 0),
+                radius: 12,
+                x: 0,
+                y: 6
+            )
             .scaleEffect(isHovered ? 1.01 : 1.0)
         }
-        .menuStyle(BorderlessButtonMenuStyle())
+        .buttonStyle(.plain)
         .onHover { hovering in
-            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+            withAnimation(.spring(response: 0.2)) {
                 isHovered = hovering
             }
         }
-        .onChange(of: isMenuOpen) { oldValue, newValue in
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                isHovered = newValue
+        .overlay {
+            if isMenuOpen {
+                FormatSelectorMenu(
+                    selectedFormat: $selectedOutputFormat,
+                    supportedTypes: supportedTypes,
+                    isPresented: $isMenuOpen
+                )
             }
         }
+    }
+    
+    func getFormatIcon(for format: UTType) -> String {
+        FormatSelectorMenu.getFormatIcon(for: format)
     }
 }
 
@@ -211,7 +218,7 @@ struct ContentView: View {
                 .opacity(0.8)
                 .ignoresSafeArea()
             
-            VStack(spacing: 24) {
+            VStack(spacing: 10) {
                 if isMultiFileMode {
                     MultiFileView(
                         processor: processor,
@@ -256,7 +263,7 @@ struct ContentView: View {
                     }
                     .transition(.opacity)
                 } else {
-                    VStack(spacing: 32) {
+                    VStack(spacing: 4) {
                         FormatSelectorView(
                             selectedInputFormat: nil,
                             selectedOutputFormat: $selectedOutputFormat,
@@ -371,14 +378,17 @@ struct FormatPill: View {
     }
 }
 func getFormatIcon(for format: UTType) -> String {
-    if format.conforms(to: .image) {
+    if format.isImageFormat {
         return "photo"
-    } else if format.conforms(to: .audiovisualContent) {
+    } else if format.isVideoFormat {
         return "film"
-    } else if format.conforms(to: .audio) {
-        return "music.note"
+    } else if format.isAudioFormat {
+        return "waveform"
+    } else if format.isPDFFormat {
+        return "doc"
+    } else {
+        return "doc.fill"
     }
-    return "doc"
 }
 
 private func checkFormatCompatibility(input: UTType, output: UTType) -> Bool {
