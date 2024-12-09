@@ -14,11 +14,19 @@ class ConversionCoordinator: NSObject {
     // Configuration
     private let settings: ConversionSettings
     
+    private var activeConversions = Set<UUID>()
+    private let activeConversionsQueue = DispatchQueue(label: "com.convierto.activeConversions")
+    
+    // Add a property to track active processing
+    private var isProcessing: Bool = false
+    private let processingQueue = DispatchQueue(label: "com.convierto.processing")
+    
     init(settings: ConversionSettings = ConversionSettings()) {
         self.settings = settings
         super.init()
         setupQueue()
         setupQueueMonitoring()
+        ProcessorFactory.setupShared(coordinator: self, settings: settings)
     }
     
     private func setupQueue() {
@@ -38,17 +46,71 @@ class ConversionCoordinator: NSObject {
     }
     
     private func handleQueueEmpty() {
-        Task {
-            await performCleanup()
+        processingQueue.sync {
+            // Only perform cleanup if we're not processing and have no active conversions
+            if !isProcessing && activeConversions.isEmpty {
+                // Add a longer delay to ensure all processes are complete
+                Task {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 second delay
+                    // Double check that we're still not processing
+                    if !self.isProcessing && self.activeConversions.isEmpty {
+                        await performCleanup()
+                    }
+                }
+            }
+        }
+    }
+    
+    func trackConversion(_ id: UUID) async {
+        logger.debug("📝 Tracking conversion: \(id.uuidString)")
+        await withCheckedContinuation { continuation in
+            activeConversionsQueue.async {
+                self.activeConversions.insert(id)
+                continuation.resume()
+            }
+        }
+    }
+    
+    func untrackConversion(_ id: UUID) async {
+        logger.debug("🗑 Untracking conversion: \(id.uuidString)")
+        await withCheckedContinuation { continuation in
+            activeConversionsQueue.async {
+                self.activeConversions.remove(id)
+                // Only trigger cleanup if this was the last conversion
+                if self.activeConversions.isEmpty {
+                    Task {
+                        // Add delay before cleanup
+                        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 second delay
+                        // Double check we're still empty
+                        if self.activeConversions.isEmpty {
+                            await self.performCleanup()
+                        }
+                    }
+                }
+                continuation.resume()
+            }
         }
     }
     
     private func performCleanup() async {
+        // Check one final time before cleanup
+        guard await shouldPerformCleanup() else {
+            logger.debug("🚫 Skipping cleanup - active processing detected")
+            return
+        }
+        
         logger.debug("🧹 Starting cleanup process")
-        // Make sure cleanup is actually async
-        try? await Task.sleep(nanoseconds: 100_000)  // Small delay to ensure async context
+        try? await Task.sleep(nanoseconds: 100_000)
         await resourceManager.cleanup()
         logger.debug("✅ Cleanup completed")
+    }
+    
+    private func shouldPerformCleanup() async -> Bool {
+        await withCheckedContinuation { continuation in
+            processingQueue.sync {
+                continuation.resume(returning: !isProcessing && activeConversions.isEmpty)
+            }
+        }
     }
     
     private func performConversion(
@@ -57,23 +119,47 @@ class ConversionCoordinator: NSObject {
         metadata: ConversionMetadata,
         progress: Progress
     ) async throws -> ProcessingResult {
-        logger.debug("⚙️ Starting conversion process")
-        
-        // Determine input type
-        let resourceValues = try url.resourceValues(forKeys: [.contentTypeKey])
-        guard let inputType = resourceValues.contentType else {
-            throw ConversionError.invalidInputType
+        processingQueue.sync { isProcessing = true }
+        defer {
+            processingQueue.sync { isProcessing = false }
         }
         
-        // Validate conversion compatibility
-        let converter = try await createConverter(for: inputType, targetFormat: outputFormat)
+        let conversionId = UUID()
+        logger.debug("🔄 Starting conversion process: \(conversionId.uuidString)")
         
-        // Perform the conversion
-        logger.debug("🔄 Converting from \(inputType.identifier) to \(outputFormat.identifier)")
-        let result = try await converter.convert(url, to: outputFormat, metadata: metadata, progress: progress)
+        // Get input type before conversion
+        let resourceValues = try await url.resourceValues(forKeys: [.contentTypeKey])
+        guard let inputType = resourceValues.contentType else {
+            throw ConversionError.invalidInput
+        }
         
-        logger.debug("✅ Conversion completed successfully")
-        return result
+        return try await withThrowingTaskGroup(of: ProcessingResult.self) { group in
+            group.addTask {
+                // Track conversion
+                await self.trackConversion(conversionId)
+                
+                defer {
+                    Task {
+                        await self.untrackConversion(conversionId)
+                    }
+                }
+                
+                let converter = try await self.createConverter(for: inputType, targetFormat: outputFormat)
+                let result = try await converter.convert(url, to: outputFormat, metadata: metadata, progress: progress)
+                
+                // Add delay before cleanup
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
+                
+                return result
+            }
+            
+            let result = try await group.next()
+            if let result = result {
+                return result
+            } else {
+                throw ConversionError.conversionFailed(reason: "Conversion failed to complete")
+            }
+        }
     }
     
     private func createConverter(

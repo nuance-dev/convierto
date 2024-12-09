@@ -1,23 +1,3 @@
-//
-//  VideoProcessor.swift
-//  Convierto
-//
-//  Created by [Your Name] on [Date].
-//
-//  This file provides video processing, including:
-//  - Direct audio extraction from video
-//  - Converting video formats
-//  - Extracting key frames as images
-//  - Handling fallback conversions with reduced quality
-//
-//  Improvements made:
-//  - More explicit error logging and handling
-//  - Clearer async/await usage
-//  - More concise and readable code
-//  - Additional debugging information when conversions fail
-//  - Removed redundant code and clarified comments
-//
-
 import AVFoundation
 import UniformTypeIdentifiers
 import CoreImage
@@ -33,11 +13,13 @@ class VideoProcessor: BaseConverter {
     private weak var processorFactory: ProcessorFactory?
     private let audioVisualizer: AudioVisualizer
     private let imageProcessor: ImageProcessor
+    private let coordinator: ConversionCoordinator
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Convierto", category: "VideoProcessor")
     
     required init(settings: ConversionSettings = ConversionSettings()) throws {
         self.audioVisualizer = AudioVisualizer(size: CGSize(width: 1920, height: 1080))
         self.imageProcessor = try ImageProcessor(settings: settings)
+        self.coordinator = ConversionCoordinator(settings: settings)
         try super.init(settings: settings)
     }
     
@@ -47,7 +29,19 @@ class VideoProcessor: BaseConverter {
     }
     
     override func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
-        logger.debug("🎬 Starting video conversion")
+        let conversionId = UUID()
+        logger.debug("🎬 Starting video conversion (ID: \(conversionId.uuidString))")
+        
+        // Track conversion at the start
+        await coordinator.trackConversion(conversionId)
+        
+        defer {
+            Task {
+                logger.debug("🏁 Completing video conversion (ID: \(conversionId.uuidString))")
+                await coordinator.untrackConversion(conversionId)
+            }
+        }
+        
         logger.debug("📂 Input URL: \(url.path(percentEncoded: false))")
         logger.debug("🎯 Target format: \(format.identifier)")
         
@@ -142,6 +136,7 @@ class VideoProcessor: BaseConverter {
         progress: Progress,
         settings: ConversionSettings = ConversionSettings()
     ) async throws -> ProcessingResult {
+        let duration = try await asset.load(.duration)
         
         logger.debug("⚙️ Starting conversion process")
         let extensionForFormat = format.preferredFilenameExtension ?? "mp4"

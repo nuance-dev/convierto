@@ -3,13 +3,26 @@ import UniformTypeIdentifiers
 import OSLog
 
 class ProcessorFactory {
-    static let shared = ProcessorFactory()
+    private static var _shared: ProcessorFactory?
+    static var shared: ProcessorFactory {
+        guard let existing = _shared else {
+            fatalError("ProcessorFactory.shared accessed before initialization. Call setupShared(coordinator:) first")
+        }
+        return existing
+    }
+    
     private var processors: [String: BaseConverter] = [:]
     private let settings: ConversionSettings
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Convierto", category: "ProcessorFactory")
+    weak var coordinator: ConversionCoordinator?
     
-    init(settings: ConversionSettings = ConversionSettings()) {
+    static func setupShared(coordinator: ConversionCoordinator, settings: ConversionSettings = ConversionSettings()) {
+        _shared = ProcessorFactory(settings: settings, coordinator: coordinator)
+    }
+    
+    init(settings: ConversionSettings = ConversionSettings(), coordinator: ConversionCoordinator) {
         self.settings = settings
+        self.coordinator = coordinator
     }
     
     func processor(for type: UTType) throws -> BaseConverter {

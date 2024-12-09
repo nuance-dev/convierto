@@ -64,6 +64,9 @@ class FileProcessor: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     let progress = Progress(totalUnitCount: 100)
     
+    // Add processing state
+    private var isActivelyProcessing: Bool = false
+    
     init(settings: ConversionSettings = ConversionSettings()) {
         self.coordinator = ConversionCoordinator()
         setupProgressTracking()
@@ -78,6 +81,9 @@ class FileProcessor: ObservableObject {
     }
     
     func processFile(_ url: URL, outputFormat: UTType) async throws -> ProcessingResult {
+        isActivelyProcessing = true
+        defer { isActivelyProcessing = false }
+        
         logger.debug("🔄 Starting file processing")
         logger.debug("📂 Input URL: \(url.path)")
         
@@ -107,14 +113,37 @@ class FileProcessor: ObservableObject {
         }
     }
     
-    func cleanup() async {
-        for url in temporaryFiles {
-            try? FileManager.default.removeItem(at: url)
+    func cleanup() {
+        Task { @MainActor in
+            // Only cleanup if we're not actively processing
+            guard !isActivelyProcessing else {
+                logger.debug("🚫 Skipping cleanup - active processing in progress")
+                return
+            }
+            
+            // Add delay before cleanup
+            try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 second delay
+            
+            // Check again after delay
+            guard !isActivelyProcessing else {
+                logger.debug("🚫 Skipping cleanup - processing started during delay")
+                return
+            }
+            
+            logger.debug("🧹 Starting cleanup process")
+            // Cancel any ongoing processing
+            cancelProcessing()
+            
+            // Clear all files and results
+            clearFiles()
+            
+            // Reset state
+            currentStage = .idle
+            conversionProgress = 0
+            error = nil
+            
+            logger.debug("✅ Cleanup completed")
         }
-        temporaryFiles.removeAll()
-        currentStage = .idle
-        conversionProgress = 0
-        error = nil
     }
     
     deinit {
@@ -482,5 +511,27 @@ class FileProcessor: ObservableObject {
         currentStage = .idle
         error = ConversionError.cancelled
         conversionProgress = 0
+    }
+    
+    private func clearFiles() {
+        logger.debug("🗑 Clearing temporary files and results")
+        
+        // Clear processing results
+        processingResults.removeAll()
+        
+        // Remove temporary files
+        for url in temporaryFiles {
+            do {
+                try FileManager.default.removeItem(at: url)
+                logger.debug("✅ Removed temporary file: \(url.lastPathComponent)")
+            } catch {
+                logger.error("❌ Failed to remove temporary file: \(url.lastPathComponent), error: \(error.localizedDescription)")
+            }
+        }
+        
+        // Clear the set of temporary files
+        temporaryFiles.removeAll()
+        
+        logger.debug("✅ All temporary files cleared")
     }
 }
