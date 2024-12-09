@@ -32,7 +32,6 @@ class VideoProcessor: BaseConverter {
         let conversionId = UUID()
         logger.debug("🎬 Starting video conversion (ID: \(conversionId.uuidString))")
         
-        // Track conversion at the start
         await coordinator.trackConversion(conversionId)
         
         defer {
@@ -48,38 +47,32 @@ class VideoProcessor: BaseConverter {
         let asset = AVURLAsset(url: url)
         logger.debug("✅ Created AVURLAsset from provided URL")
         
-        // If target is audio, we try direct audio extraction
+        // Direct audio extraction for audio formats
         if format.conforms(to: .audio) || format == .mp3 {
-            logger.debug("🎵 Target is audio-only. Attempting direct audio extraction.")
+            logger.debug("🎵 Using direct audio extraction")
             do {
                 return try await extractAudio(from: asset, to: format, metadata: metadata, progress: progress)
             } catch {
                 logger.error("❌ Audio extraction failed: \(error.localizedDescription)")
-                throw ConversionError.conversionFailed(reason: "Audio extraction failed: \(error.localizedDescription)")
+                // Try fallback with different settings
+                return try await handleFallback(
+                    asset: asset,
+                    originalURL: url,
+                    to: format,
+                    metadata: metadata,
+                    progress: progress
+                )
             }
         }
         
-        // Otherwise, proceed with video conversion or visualization
-        do {
-            logger.debug("⚙️ Attempting primary conversion")
-            return try await performConversion(
-                asset: asset, 
-                originalURL: url, 
-                to: format, 
-                metadata: metadata, 
-                progress: progress
-            )
-        } catch {
-            logger.error("❌ Primary conversion failed: \(error.localizedDescription)")
-            logger.debug("🔄 Attempting fallback conversion with lower quality settings")
-            return try await handleFallback(
-                asset: asset, 
-                originalURL: url, 
-                to: format, 
-                metadata: metadata, 
-                progress: progress
-            )
-        }
+        // Regular video conversion path
+        return try await performConversion(
+            asset: asset,
+            originalURL: url,
+            to: format,
+            metadata: metadata,
+            progress: progress
+        )
     }
     
     override func canConvert(from: UTType, to: UTType) -> Bool {
@@ -293,59 +286,57 @@ class VideoProcessor: BaseConverter {
         return metadata
     }
     
-    private func extractAudio(
+    func extractAudio(
         from asset: AVAsset,
         to format: UTType,
         metadata: ConversionMetadata,
         progress: Progress
     ) async throws -> ProcessingResult {
+        logger.debug("🎵 Starting direct audio extraction")
         
-        logger.debug("🎵 Extracting audio from video")
-        
-        guard let _ = try await asset.loadTracks(withMediaType: .audio).first else {
+        guard let audioTrack = try await asset.loadTracks(withMediaType: .audio).first else {
             logger.error("❌ No audio track found in the video")
             throw ConversionError.conversionFailed(reason: "No audio track found in video")
         }
         
-        // Export audio as M4A first
+        // Create export session with audio-specific preset
         let preset = AVAssetExportPresetAppleM4A
         guard let exportSession = AVAssetExportSession(asset: asset, presetName: preset) else {
             logger.error("❌ Failed to create export session for audio extraction")
             throw ConversionError.conversionFailed(reason: "Failed to create export session for audio")
         }
         
-        let extensionForAudio = format.preferredFilenameExtension ?? "m4a"
+        // Set up export parameters
+        let extensionForAudio = format == .mp3 ? "m4a" : format.preferredFilenameExtension ?? "m4a"
         let outputURL = try CacheManager.shared.createTemporaryURL(for: extensionForAudio)
         
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .m4a
-        exportSession.timeRange = CMTimeRange(start: .zero, duration: asset.duration)
+        exportSession.timeRange = CMTimeRange(start: .zero, duration: try await asset.load(.duration))
         
+        // Track progress
         let progressTask = Task {
-            var lastProgress: Float = 0
             while !Task.isCancelled {
                 let currentProgress = exportSession.progress
-                if currentProgress != lastProgress {
-                    logger.debug("📊 Audio export progress: \(Int(currentProgress * 100))%")
-                    lastProgress = currentProgress
-                }
                 progress.completedUnitCount = Int64(currentProgress * 100)
+                logger.debug("📊 Audio export progress: \(Int(currentProgress * 100))%")
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 if exportSession.status != .exporting { break }
             }
         }
         
-        logger.debug("▶️ Starting audio extraction export")
+        logger.debug("▶️ Starting audio extraction")
         await exportSession.export()
         progressTask.cancel()
         
         switch exportSession.status {
         case .completed:
-            logger.debug("✅ Audio extraction completed successfully")
+            logger.debug("✅ Audio extraction completed")
             
-            // If MP3 is requested, convert from M4A to MP3 here.
-            // For simplicity, let's skip MP3 conversion in this improved code snippet.
-            // You could implement MP3 conversion by adding a separate method if desired.
+            // If MP3 is requested, convert M4A to MP3
+            if format == .mp3 {
+                return try await convertM4AToMP3(outputURL, metadata: metadata)
+            }
             
             let resultMetadata = try await extractMetadata(from: asset)
             return ProcessingResult(
@@ -355,16 +346,90 @@ class VideoProcessor: BaseConverter {
                 fileType: format,
                 metadata: resultMetadata
             )
+            
         case .failed:
             let errorMessage = exportSession.error?.localizedDescription ?? "Unknown error"
             logger.error("❌ Audio extraction failed: \(errorMessage)")
             throw ConversionError.exportFailed(reason: "Failed to extract audio: \(errorMessage)")
+            
         case .cancelled:
             logger.error("❌ Audio extraction cancelled")
             throw ConversionError.exportFailed(reason: "Audio extraction was cancelled")
+            
         default:
             let statusRaw = exportSession.status.rawValue
             logger.error("❌ Audio extraction ended with unexpected status: \(statusRaw)")
+            throw ConversionError.exportFailed(reason: "Unexpected export status: \(statusRaw)")
+        }
+    }
+    
+    private func convertM4AToMP3(_ inputURL: URL, metadata: ConversionMetadata) async throws -> ProcessingResult {
+        logger.debug("🎵 Converting M4A to MP3")
+        
+        // First create a temporary M4A file
+        let tempM4AURL = try await CacheManager.shared.createTemporaryURL(for: "m4a")
+        let asset = AVURLAsset(url: inputURL)
+        
+        // Create export session with audio preset
+        guard let exportSession = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetAppleM4A
+        ) else {
+            throw ConversionError.exportFailed(reason: "Failed to create export session for MP3 conversion")
+        }
+        
+        exportSession.outputURL = tempM4AURL
+        exportSession.outputFileType = .m4a
+        exportSession.audioTimePitchAlgorithm = .spectral
+        
+        logger.debug("▶️ Starting M4A export")
+        await exportSession.export()
+        
+        switch exportSession.status {
+        case .completed:
+            logger.debug("✅ M4A export completed successfully")
+            
+            // Create final MP3 URL
+            let mp3URL = try await CacheManager.shared.createTemporaryURL(for: "mp3")
+            
+            // Ensure we have write permissions for the output directory
+            let outputDirectory = mp3URL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(
+                at: outputDirectory,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            
+            // Remove any existing file at the destination
+            if FileManager.default.fileExists(atPath: mp3URL.path) {
+                try FileManager.default.removeItem(at: mp3URL)
+            }
+            
+            // Move the M4A file to MP3
+            try FileManager.default.moveItem(at: tempM4AURL, to: mp3URL)
+            
+            logger.debug("✅ File successfully moved to: \(mp3URL.path)")
+            
+            return ProcessingResult(
+                outputURL: mp3URL,
+                originalFileName: metadata.originalFileName ?? "audio",
+                suggestedFileName: "converted_audio.mp3",
+                fileType: .mp3,
+                metadata: metadata.toDictionary()
+            )
+            
+        case .failed:
+            let errorMessage = exportSession.error?.localizedDescription ?? "Unknown error"
+            logger.error("❌ MP3 conversion failed: \(errorMessage)")
+            throw ConversionError.exportFailed(reason: "Failed to convert to MP3: \(errorMessage)")
+            
+        case .cancelled:
+            logger.error("❌ MP3 conversion cancelled")
+            throw ConversionError.exportFailed(reason: "MP3 conversion was cancelled")
+            
+        default:
+            let statusRaw = exportSession.status.rawValue
+            logger.error("❌ MP3 conversion ended with unexpected status: \(statusRaw)")
             throw ConversionError.exportFailed(reason: "Unexpected export status: \(statusRaw)")
         }
     }

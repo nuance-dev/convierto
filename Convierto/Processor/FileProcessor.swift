@@ -279,22 +279,13 @@ class FileProcessor: ObservableObject {
                     
                 case (let input, let output) where input.conforms(to: .movie) && output.conforms(to: .audio):
                     logger.debug("🎵 Processing video audio extraction")
-                let audioProcessor = try AudioProcessor()
-                    return try await withCheckedThrowingContinuation { continuation in
-                        Task {
-                            do {
-                                let result = try await audioProcessor.convert(
-                                    url,
-                                    to: outputFormat,
-                                    metadata: metadata,
-                                    progress: progress
-                                )
-                                continuation.resume(returning: result)
-                            } catch {
-                                continuation.resume(throwing: error)
-                            }
-                        }
-                    }
+                    let videoProcessor = try VideoProcessor()
+                    return try await videoProcessor.extractAudio(
+                        from: AVURLAsset(url: url),
+                        to: outputFormat,
+                        metadata: metadata,
+                        progress: progress
+                    )
                     
                 // Audio Conversions
                 case (let input, let output) where input.conforms(to: .audio) && output.conforms(to: .audio):

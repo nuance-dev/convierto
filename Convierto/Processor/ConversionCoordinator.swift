@@ -76,13 +76,13 @@ class ConversionCoordinator: NSObject {
         await withCheckedContinuation { continuation in
             activeConversionsQueue.async {
                 self.activeConversions.remove(id)
-                // Only trigger cleanup if this was the last conversion
+                // Only schedule cleanup if this was the last conversion
                 if self.activeConversions.isEmpty {
                     Task {
-                        // Add delay before cleanup
-                        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 second delay
-                        // Double check we're still empty
-                        if self.activeConversions.isEmpty {
+                        // Increase delay before cleanup
+                        try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 second delay
+                        // Double check active conversions and processing state
+                        if self.activeConversions.isEmpty && !self.isProcessing {
                             await self.performCleanup()
                         }
                     }
