@@ -13,30 +13,46 @@ class AudioVisualizer {
     private let settings = ConversionSettings()
     private let ciContext = CIContext()
     
-    // Modern color palette inspired by League of Legends
+    // Modern, minimal color palette
     private let backgroundColors: [CGColor] = [
-        NSColor(calibratedRed: 0.05, green: 0.07, blue: 0.12, alpha: 1.0).cgColor, // Deep space blue
-        NSColor(calibratedRed: 0.08, green: 0.12, blue: 0.20, alpha: 1.0).cgColor  // Midnight blue
+        NSColor(calibratedRed: 0.03, green: 0.03, blue: 0.05, alpha: 1.0).cgColor, // Near black
+        NSColor(calibratedRed: 0.06, green: 0.06, blue: 0.09, alpha: 1.0).cgColor  // Deep space
     ]
     
-    private let orbColors: [CGColor] = [
-        NSColor(calibratedRed: 0.0, green: 0.8, blue: 1.0, alpha: 0.8).cgColor,    // Cosmic blue
-        NSColor(calibratedRed: 0.4, green: 0.0, blue: 1.0, alpha: 0.6).cgColor,    // Deep purple
-        NSColor(calibratedRed: 1.0, green: 0.4, blue: 0.0, alpha: 0.7).cgColor     // Energy orange
+    private let accentColors: [CGColor] = [
+        NSColor.white.withAlphaComponent(0.8).cgColor,
+        NSColor(calibratedRed: 0.95, green: 0.95, blue: 1.0, alpha: 0.7).cgColor,
+        NSColor(calibratedRed: 0.85, green: 0.85, blue: 1.0, alpha: 0.6).cgColor
     ]
     
-    // Particle system properties
+    // Enhanced particle system
     private struct Particle {
         var position: CGPoint
         var velocity: CGPoint
+        var acceleration: CGPoint
         var size: CGFloat
         var alpha: CGFloat
         var color: CGColor
         var life: CGFloat
+        var initialLife: CGFloat
+        var rotationAngle: CGFloat
+        var rotationSpeed: CGFloat
+    }
+    
+    private struct EnergyWave {
+        var centerPoint: CGPoint
+        var radius: CGFloat
+        var targetRadius: CGFloat
+        var alpha: CGFloat
+        var thickness: CGFloat
+        var speed: CGFloat
     }
     
     private var particles: [Particle] = []
-    private let maxParticles = 150
+    private var energyWaves: [EnergyWave] = []
+    private var coreEnergy: CGFloat = 0.0
+    private var lastAudioIntensity: CGFloat = 0.0
+    private let maxParticles = 500
     
     init(size: CGSize) {
         self.size = size
@@ -141,42 +157,227 @@ class AudioVisualizer {
             throw ConversionError.conversionFailed(reason: "Failed to create graphics context")
         }
         
-        // Draw cosmic background
-        drawCosmicBackground(in: context)
+        // Draw ethereal background
+        drawModernBackground(in: context)
         
         // Process audio data
         let frequencies = processFrequencyBands(samples)
+        let currentIntensity = CGFloat(frequencies.reduce(0, +) / Float(frequencies.count))
         
-        // Update and draw particle system
-        updateParticleSystem(frequencies: frequencies)
+        // Smooth intensity transitions
+        lastAudioIntensity = lastAudioIntensity * 0.7 + currentIntensity * 0.3
+        
+        // Update visualization elements
+        updateParticleSystem(intensity: lastAudioIntensity)
+        updateEnergyWaves(intensity: lastAudioIntensity)
+        updateCoreEnergy(intensity: lastAudioIntensity)
+        
+        // Render visualization elements
+        drawEnergyWaves(in: context)
+        drawCoreElement(in: context)
         drawParticles(in: context)
         
-        // Draw energy orbs
-        drawEnergyOrbs(frequencies: frequencies, in: context)
-        
-        // Add bloom effect
-        applyBloomEffect(to: context)
+        // Apply post-processing effects
+        applyModernPostProcessing(to: context)
         
         return context.makeImage()
     }
     
-    private func drawCosmicBackground(in context: CGContext) {
-        // Create a gradient background with subtle noise
-        guard let gradient = CGGradient(
+    private func drawModernBackground(in context: CGContext) {
+        // Create smooth gradient background
+        let gradient = CGGradient(
             colorsSpace: CGColorSpaceCreateDeviceRGB(),
             colors: backgroundColors as CFArray,
             locations: [0.0, 1.0]
-        ) else { return }
+        )!
         
         context.drawLinearGradient(
             gradient,
-            start: CGPoint(x: 0, y: size.height),
-            end: CGPoint(x: size.width, y: 0),
+            start: CGPoint(x: size.width * 0.5, y: 0),
+            end: CGPoint(x: size.width * 0.5, y: size.height),
             options: []
         )
         
         // Add subtle noise texture
-        addNoiseTexture(to: context)
+        context.setAlpha(0.015)
+        for _ in 0..<2000 {
+            let x = CGFloat.random(in: 0..<size.width)
+            let y = CGFloat.random(in: 0..<size.height)
+            let size = CGFloat.random(in: 1...2)
+            context.fill(CGRect(x: x, y: y, width: size, height: size))
+        }
+    }
+    
+    private func updateParticleSystem(intensity: CGFloat) {
+        // Update existing particles
+        particles = particles.compactMap { particle in
+            var updated = particle
+            
+            // Apply physics
+            updated.velocity.x += updated.acceleration.x
+            updated.velocity.y += updated.acceleration.y
+            updated.position.x += updated.velocity.x
+            updated.position.y += updated.velocity.y
+            
+            // Update life and appearance
+            updated.life -= 0.016
+            updated.alpha = pow(updated.life / updated.initialLife, 1.5)
+            updated.rotationAngle += updated.rotationSpeed
+            
+            // Add some turbulence
+            updated.acceleration = CGPoint(
+                x: updated.acceleration.x + CGFloat.random(in: -0.1...0.1),
+                y: updated.acceleration.y + CGFloat.random(in: -0.1...0.1)
+            )
+            
+            return updated.life > 0 ? updated : nil
+        }
+        
+        // Generate new particles based on intensity
+        let newParticleCount = Int(intensity * 20)
+        
+        for _ in 0..<newParticleCount where particles.count < maxParticles {
+            let angle = CGFloat.random(in: 0...(2 * .pi))
+            let distance = CGFloat.random(in: 50...150)
+            let speed = CGFloat.random(in: 2...5)
+            
+            let particle = Particle(
+                position: CGPoint(x: size.width/2, y: size.height/2),
+                velocity: CGPoint(
+                    x: cos(angle) * speed,
+                    y: sin(angle) * speed
+                ),
+                acceleration: CGPoint(
+                    x: cos(angle) * 0.1,
+                    y: sin(angle) * 0.1
+                ),
+                size: CGFloat.random(in: 1...3),
+                alpha: 1.0,
+                color: accentColors.randomElement()!,
+                life: CGFloat.random(in: 0.8...1.2),
+                initialLife: 1.0,
+                rotationAngle: CGFloat.random(in: 0...(2 * .pi)),
+                rotationSpeed: CGFloat.random(in: -0.1...0.1)
+            )
+            
+            particles.append(particle)
+        }
+    }
+    
+    private func updateEnergyWaves(intensity: CGFloat) {
+        // Update existing waves
+        energyWaves = energyWaves.filter { wave in
+            wave.alpha > 0.05
+        }
+        
+        // Generate new waves based on intensity
+        if intensity > 0.5 && energyWaves.count < 5 {
+            let wave = EnergyWave(
+                centerPoint: CGPoint(x: size.width/2, y: size.height/2),
+                radius: 0,
+                targetRadius: min(size.width, size.height) * 0.8,
+                alpha: 0.8,
+                thickness: CGFloat.random(in: 1...3),
+                speed: CGFloat.random(in: 2...4)
+            )
+            energyWaves.append(wave)
+        }
+        
+        // Update wave properties
+        for i in 0..<energyWaves.count {
+            energyWaves[i].radius += energyWaves[i].speed
+            energyWaves[i].alpha *= 0.95
+        }
+    }
+    
+    private func updateCoreEnergy(intensity: CGFloat) {
+        // Smooth core energy transitions
+        coreEnergy = coreEnergy * 0.8 + intensity * 0.2
+    }
+    
+    private func drawParticles(in context: CGContext) {
+        for particle in particles {
+            context.saveGState()
+            context.setAlpha(particle.alpha)
+            context.setFillColor(particle.color)
+            
+            context.translateBy(x: particle.position.x, y: particle.position.y)
+            context.rotate(by: particle.rotationAngle)
+            
+            let rect = CGRect(
+                x: -particle.size/2,
+                y: -particle.size/2,
+                width: particle.size,
+                height: particle.size
+            )
+            
+            context.fillEllipse(in: rect)
+            context.restoreGState()
+        }
+    }
+    
+    private func drawEnergyWaves(in context: CGContext) {
+        for wave in energyWaves {
+            context.setStrokeColor(NSColor.white.withAlphaComponent(wave.alpha).cgColor)
+            context.setLineWidth(wave.thickness)
+            context.strokeEllipse(in: CGRect(
+                x: wave.centerPoint.x - wave.radius,
+                y: wave.centerPoint.y - wave.radius,
+                width: wave.radius * 2,
+                height: wave.radius * 2
+            ))
+        }
+    }
+    
+    private func drawCoreElement(in context: CGContext) {
+        let centerX = size.width / 2
+        let centerY = size.height / 2
+        let baseRadius = min(size.width, size.height) * 0.15
+        let currentRadius = baseRadius * (0.8 + coreEnergy * 0.4)
+        
+        // Draw core glow
+        for i in (1...5).reversed() {
+            let alpha = (0.2 / CGFloat(i)) * coreEnergy
+            context.setFillColor(NSColor.white.withAlphaComponent(alpha).cgColor)
+            let glowRadius = currentRadius * CGFloat(i)
+            context.fillEllipse(in: CGRect(
+                x: centerX - glowRadius,
+                y: centerY - glowRadius,
+                width: glowRadius * 2,
+                height: glowRadius * 2
+            ))
+        }
+        
+        // Draw core
+        context.setFillColor(NSColor.white.withAlphaComponent(0.9).cgColor)
+        context.fillEllipse(in: CGRect(
+            x: centerX - currentRadius,
+            y: centerY - currentRadius,
+            width: currentRadius * 2,
+            height: currentRadius * 2
+        ))
+    }
+    
+    private func applyModernPostProcessing(to context: CGContext) {
+        guard let image = context.makeImage() else { return }
+        let ciImage = CIImage(cgImage: image)
+        
+        // Apply sophisticated bloom effect
+        let bloomFilter = CIFilter(name: "CIBloom")!
+        bloomFilter.setValue(ciImage, forKey: kCIInputImageKey)
+        bloomFilter.setValue(3.0, forKey: kCIInputRadiusKey)
+        bloomFilter.setValue(1.0, forKey: kCIInputIntensityKey)
+        
+        // Apply subtle chromatic aberration
+        let colorControls = CIFilter(name: "CIColorControls")!
+        colorControls.setValue(bloomFilter.outputImage, forKey: kCIInputImageKey)
+        colorControls.setValue(1.02, forKey: kCIInputSaturationKey)
+        colorControls.setValue(1.05, forKey: kCIInputBrightnessKey)
+        
+        if let outputImage = colorControls.outputImage,
+           let cgImage = ciContext.createCGImage(outputImage, from: outputImage.extent) {
+            context.draw(cgImage, in: CGRect(origin: .zero, size: size))
+        }
     }
     
     private func processFrequencyBands(_ samples: [Float]) -> [Float] {
@@ -195,117 +396,6 @@ class AudioVisualizer {
         }
         
         return bands.map { min($0 * 2, 1.0) } // Normalize
-    }
-    
-    private func updateParticleSystem(frequencies: [Float]) {
-        // Update existing particles
-        particles = particles.compactMap { particle in
-            var updated = particle
-            updated.position.x += particle.velocity.x
-            updated.position.y += particle.velocity.y
-            updated.life -= 0.016 // Assuming 60fps
-            updated.alpha = updated.life
-            
-            return updated.life > 0 ? updated : nil
-        }
-        
-        // Generate new particles based on audio intensity
-        let intensity = frequencies.reduce(0, +) / Float(frequencies.count)
-        let newParticleCount = Int(intensity * 10)
-        
-        for _ in 0..<newParticleCount where particles.count < maxParticles {
-            let angle = CGFloat.random(in: 0...(2 * .pi))
-            let speed = CGFloat.random(in: 1...3)
-            particles.append(Particle(
-                position: CGPoint(x: size.width/2, y: size.height/2),
-                velocity: CGPoint(x: cos(angle) * speed, y: sin(angle) * speed),
-                size: CGFloat.random(in: 2...6),
-                alpha: 1.0,
-                color: orbColors.randomElement()!,
-                life: 1.0
-            ))
-        }
-    }
-    
-    private func drawParticles(in context: CGContext) {
-        for particle in particles {
-            context.setFillColor(particle.color.copy(alpha: particle.alpha)!)
-            let rect = CGRect(
-                x: particle.position.x - particle.size/2,
-                y: particle.position.y - particle.size/2,
-                width: particle.size,
-                height: particle.size
-            )
-            context.fillEllipse(in: rect)
-        }
-    }
-    
-    private func drawEnergyOrbs(frequencies: [Float], in context: CGContext) {
-        let centerX = size.width / 2
-        let centerY = size.height / 2
-        let maxRadius = min(size.width, size.height) * 0.4
-        
-        // Draw central orb
-        let centralOrbSize = maxRadius * 0.3 * CGFloat(frequencies.reduce(0, +) / Float(frequencies.count))
-        drawGlowingOrb(at: CGPoint(x: centerX, y: centerY),
-                      radius: centralOrbSize,
-                      color: orbColors[0],
-                      in: context)
-        
-        // Draw orbital orbs
-        for (index, frequency) in frequencies.enumerated() {
-            let angle = (2 * .pi * Double(index)) / Double(frequencies.count)
-            let orbitalRadius = maxRadius * CGFloat(0.5 + frequency * 0.5)
-            let x = centerX + cos(angle) * orbitalRadius
-            let y = centerY + sin(angle) * orbitalRadius
-            let orbSize = maxRadius * 0.15 * CGFloat(frequency)
-            
-            drawGlowingOrb(at: CGPoint(x: x, y: y),
-                          radius: orbSize,
-                          color: orbColors[index % orbColors.count],
-                          in: context)
-        }
-    }
-    
-    private func drawGlowingOrb(at center: CGPoint, radius: CGFloat, color: CGColor, in context: CGContext) {
-        // Draw core
-        context.setFillColor(color)
-        context.fillEllipse(in: CGRect(x: center.x - radius, y: center.y - radius,
-                                     width: radius * 2, height: radius * 2))
-        
-        // Draw glow
-        for i in 1...3 {
-            let alpha = 0.3 / CGFloat(i)
-            context.setFillColor(color.copy(alpha: alpha)!)
-            let glowRadius = radius * CGFloat(1 + i * Int(0.5))
-            context.fillEllipse(in: CGRect(x: center.x - glowRadius, y: center.y - glowRadius,
-                                         width: glowRadius * 2, height: glowRadius * 2))
-        }
-    }
-    
-    private func addNoiseTexture(to context: CGContext) {
-        context.setFillColor(NSColor.white.withAlphaComponent(0.03).cgColor)
-        for _ in 0..<1000 {
-            let x = CGFloat.random(in: 0..<size.width)
-            let y = CGFloat.random(in: 0..<size.height)
-            context.fill(CGRect(x: x, y: y, width: 1, height: 1))
-        }
-    }
-    
-    private func applyBloomEffect(to context: CGContext) {
-        // Implement bloom effect using CIFilter
-        guard let image = context.makeImage() else { return }
-        let ciImage = CIImage(cgImage: image)
-        
-        let bloomFilter = CIFilter(name: "CIBloom")
-        bloomFilter?.setValue(ciImage, forKey: kCIInputImageKey)
-        bloomFilter?.setValue(2.5, forKey: kCIInputRadiusKey)
-        bloomFilter?.setValue(1.0, forKey: kCIInputIntensityKey)
-        
-        if let outputImage = bloomFilter?.outputImage,
-           let cgImage = ciContext.createCGImage(outputImage, from: outputImage.extent) {
-            context.draw(cgImage, in: CGRect(origin: .zero, size: size))
-        }
     }
     
     func createVideoTrack(
