@@ -13,12 +13,30 @@ class AudioVisualizer {
     private let settings = ConversionSettings()
     private let ciContext = CIContext()
     
-    // Updated palette: minimal, refined, modern.  
-    // We'll define primary colors for a sleek gradient line and subtle background.
-    private let lineGradientColors: [CGColor] = [
-        NSColor(calibratedRed: 0.22, green: 0.75, blue: 0.93, alpha: 1.0).cgColor, // Teal
-        NSColor(calibratedRed: 0.62, green: 0.30, blue: 1.0, alpha: 1.0).cgColor  // Purple
+    // Modern color palette inspired by League of Legends
+    private let backgroundColors: [CGColor] = [
+        NSColor(calibratedRed: 0.05, green: 0.07, blue: 0.12, alpha: 1.0).cgColor, // Deep space blue
+        NSColor(calibratedRed: 0.08, green: 0.12, blue: 0.20, alpha: 1.0).cgColor  // Midnight blue
     ]
+    
+    private let orbColors: [CGColor] = [
+        NSColor(calibratedRed: 0.0, green: 0.8, blue: 1.0, alpha: 0.8).cgColor,    // Cosmic blue
+        NSColor(calibratedRed: 0.4, green: 0.0, blue: 1.0, alpha: 0.6).cgColor,    // Deep purple
+        NSColor(calibratedRed: 1.0, green: 0.4, blue: 0.0, alpha: 0.7).cgColor     // Energy orange
+    ]
+    
+    // Particle system properties
+    private struct Particle {
+        var position: CGPoint
+        var velocity: CGPoint
+        var size: CGFloat
+        var alpha: CGFloat
+        var color: CGColor
+        var life: CGFloat
+    }
+    
+    private var particles: [Particle] = []
+    private let maxParticles = 150
     
     init(size: CGSize) {
         self.size = size
@@ -33,8 +51,8 @@ class AudioVisualizer {
         
         let duration = try await asset.load(.duration)
         let actualFrameCount = frameCount ?? min(
-            Int(duration.seconds * 30), // 30 fps
-            1800 // Max 60 seconds
+            Int(duration.seconds * 30),
+            1800
         )
         
         var frames: [CGImage] = []
@@ -44,7 +62,6 @@ class AudioVisualizer {
         
         for frameIndex in 0..<actualFrameCount {
             if Task.isCancelled { break }
-            
             let progress = Double(frameIndex) / Double(actualFrameCount)
             progressHandler?(progress)
             
@@ -80,11 +97,7 @@ class AudioVisualizer {
             AVSampleRateKey: 44100.0
         ]
         
-        let output = AVAssetReaderTrackOutput(
-            track: audioTrack,
-            outputSettings: outputSettings
-        )
-        
+        let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
         reader.add(output)
         
         let timeRange = CMTimeRange(
@@ -106,12 +119,7 @@ class AudioVisualizer {
                 samples.reserveCapacity(samples.count + sampleCount)
                 
                 var data = [Float](repeating: 0, count: sampleCount)
-                CMBlockBufferCopyDataBytes(
-                    blockBuffer,
-                    atOffset: 0,
-                    dataLength: length,
-                    destination: &data
-                )
+                CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: &data)
                 samples.append(contentsOf: data)
             }
         }
@@ -133,134 +141,171 @@ class AudioVisualizer {
             throw ConversionError.conversionFailed(reason: "Failed to create graphics context")
         }
         
-        drawBackground(in: context)
-        drawWaveform(samples: samples, in: context)
-        drawParticles(samples: samples, in: context)
+        // Draw cosmic background
+        drawCosmicBackground(in: context)
+        
+        // Process audio data
+        let frequencies = processFrequencyBands(samples)
+        
+        // Update and draw particle system
+        updateParticleSystem(frequencies: frequencies)
+        drawParticles(in: context)
+        
+        // Draw energy orbs
+        drawEnergyOrbs(frequencies: frequencies, in: context)
+        
+        // Add bloom effect
+        applyBloomEffect(to: context)
         
         return context.makeImage()
     }
     
-    // Modern, minimal background: dark, subtle gradient.
-    private func drawBackground(in context: CGContext) {
-        let gradientColors = [
-            NSColor(calibratedRed: 0.05, green: 0.05, blue: 0.11, alpha: 1.0).cgColor,
-            NSColor(calibratedRed: 0.03, green: 0.03, blue: 0.07, alpha: 1.0).cgColor
-        ] as CFArray
-        
+    private func drawCosmicBackground(in context: CGContext) {
+        // Create a gradient background with subtle noise
         guard let gradient = CGGradient(
             colorsSpace: CGColorSpaceCreateDeviceRGB(),
-            colors: gradientColors,
+            colors: backgroundColors as CFArray,
             locations: [0.0, 1.0]
         ) else { return }
         
         context.drawLinearGradient(
             gradient,
-            start: CGPoint(x: 0, y: 0),
-            end: CGPoint(x: 0, y: size.height),
+            start: CGPoint(x: 0, y: size.height),
+            end: CGPoint(x: size.width, y: 0),
             options: []
         )
+        
+        // Add subtle noise texture
+        addNoiseTexture(to: context)
     }
     
-    // Smooth and modern waveform: a gentle spline with a neon-like gradient line + subtle glow.
-    private func drawWaveform(samples: [Float], in context: CGContext) {
-        let midY = size.height / 2
-        let amplitudeScale = size.height / 4
-        let xScale = size.width / CGFloat(samples.count)
+    private func processFrequencyBands(_ samples: [Float]) -> [Float] {
+        // Process audio data into frequency bands using FFT
+        // Return normalized frequency bands
+        // This is a simplified version - implement proper FFT for production
+        let bandCount = 8
+        var bands = [Float](repeating: 0, count: bandCount)
+        let samplesPerBand = samples.count / bandCount
         
-        // Smooth samples to reduce jitter.
-        let smoothSamples = smoothData(samples, windowSize: 4)
-        
-        var points: [CGPoint] = []
-        for (index, sample) in smoothSamples.enumerated() {
-            let x = CGFloat(index) * xScale
-            let y = midY + (CGFloat(sample) * amplitudeScale)
-            points.append(CGPoint(x: x, y: y))
+        for i in 0..<bandCount {
+            let start = i * samplesPerBand
+            let end = start + samplesPerBand
+            let bandSamples = samples[start..<end]
+            bands[i] = bandSamples.map { abs($0) }.max() ?? 0
         }
         
-        let path = CGMutablePath()
-        if points.count >= 4 {
-            path.move(to: points[0])
-            for i in 1..<(points.count - 2) {
-                let p0 = points[i - 1]
-                let p1 = points[i]
-                let p2 = points[i + 1]
-                let p3 = points[i + 2]
-                
-                let cp1x = p1.x + (p2.x - p0.x) / 6
-                let cp1y = p1.y + (p2.y - p0.y) / 6
-                let cp2x = p2.x - (p3.x - p1.x) / 6
-                let cp2y = p2.y - (p3.y - p1.y) / 6
-                path.addCurve(to: p2, control1: CGPoint(x: cp1x, y: cp1y), control2: CGPoint(x: cp2x, y: cp2y))
-            }
-        }
-        
-        // Draw gradient line
-        context.saveGState()
-        context.addPath(path)
-        context.setLineWidth(2.0)
-        context.replacePathWithStrokedPath()
-        context.clip()
-        
-        guard let lineGradient = CGGradient(
-            colorsSpace: CGColorSpaceCreateDeviceRGB(),
-            colors: lineGradientColors as CFArray,
-            locations: [0.0, 1.0]
-        ) else {
-            context.restoreGState()
-            return
-        }
-        
-        context.drawLinearGradient(
-            lineGradient,
-            start: CGPoint(x: 0, y: 0),
-            end: CGPoint(x: 0, y: size.height),
-            options: []
-        )
-        context.restoreGState()
-        
-        // Add a subtle glow behind the waveform
-        context.saveGState()
-        context.setShadow(offset: .zero, blur: 15, color: NSColor(calibratedRed: 0.3, green: 0.1, blue: 0.4, alpha: 0.5).cgColor)
-        context.setLineWidth(2.0)
-        // Just stroke a transparent line to apply the shadow glow
-        context.setStrokeColor(NSColor.clear.cgColor)
-        context.addPath(path)
-        context.strokePath()
-        context.restoreGState()
+        return bands.map { min($0 * 2, 1.0) } // Normalize
     }
     
-    // Minimal, subtle particles: fewer, small, like tiny glowing points.
-    private func drawParticles(samples: [Float], in context: CGContext) {
-        let particleCount = 10
-        let maxAmplitude = samples.map(abs).max() ?? 1.0
-        
-        for i in 0..<particleCount {
-            let progress = CGFloat(i) / CGFloat(particleCount)
-            let x = size.width * progress
-            let amplitude = CGFloat(samples[Int(progress * CGFloat(samples.count))] / maxAmplitude)
-            let y = size.height / 2 + amplitude * (size.height / 6)
+    private func updateParticleSystem(frequencies: [Float]) {
+        // Update existing particles
+        particles = particles.compactMap { particle in
+            var updated = particle
+            updated.position.x += particle.velocity.x
+            updated.position.y += particle.velocity.y
+            updated.life -= 0.016 // Assuming 60fps
+            updated.alpha = updated.life
             
-            let particleSize: CGFloat = 3.0
-            let particleRect = CGRect(x: x - particleSize/2, y: y - particleSize/2, width: particleSize, height: particleSize)
-            
-            context.saveGState()
-            context.setShadow(offset: .zero, blur: 10, color: NSColor(calibratedRed: 0.9, green: 0.9, blue: 1.0, alpha: 0.4).cgColor)
-            context.setFillColor(NSColor.white.withAlphaComponent(0.8).cgColor)
-            context.fillEllipse(in: particleRect)
-            context.restoreGState()
+            return updated.life > 0 ? updated : nil
+        }
+        
+        // Generate new particles based on audio intensity
+        let intensity = frequencies.reduce(0, +) / Float(frequencies.count)
+        let newParticleCount = Int(intensity * 10)
+        
+        for _ in 0..<newParticleCount where particles.count < maxParticles {
+            let angle = CGFloat.random(in: 0...(2 * .pi))
+            let speed = CGFloat.random(in: 1...3)
+            particles.append(Particle(
+                position: CGPoint(x: size.width/2, y: size.height/2),
+                velocity: CGPoint(x: cos(angle) * speed, y: sin(angle) * speed),
+                size: CGFloat.random(in: 2...6),
+                alpha: 1.0,
+                color: orbColors.randomElement()!,
+                life: 1.0
+            ))
         }
     }
     
-    private func smoothData(_ samples: [Float], windowSize: Int) -> [Float] {
-        guard windowSize > 1 else { return samples }
-        var smoothed = [Float](repeating: 0, count: samples.count)
-        for i in 0..<samples.count {
-            let start = max(0, i - windowSize)
-            let end = min(samples.count - 1, i + windowSize)
-            let slice = samples[start...end]
-            smoothed[i] = slice.reduce(0, +) / Float(slice.count)
+    private func drawParticles(in context: CGContext) {
+        for particle in particles {
+            context.setFillColor(particle.color.copy(alpha: particle.alpha)!)
+            let rect = CGRect(
+                x: particle.position.x - particle.size/2,
+                y: particle.position.y - particle.size/2,
+                width: particle.size,
+                height: particle.size
+            )
+            context.fillEllipse(in: rect)
         }
-        return smoothed
+    }
+    
+    private func drawEnergyOrbs(frequencies: [Float], in context: CGContext) {
+        let centerX = size.width / 2
+        let centerY = size.height / 2
+        let maxRadius = min(size.width, size.height) * 0.4
+        
+        // Draw central orb
+        let centralOrbSize = maxRadius * 0.3 * CGFloat(frequencies.reduce(0, +) / Float(frequencies.count))
+        drawGlowingOrb(at: CGPoint(x: centerX, y: centerY),
+                      radius: centralOrbSize,
+                      color: orbColors[0],
+                      in: context)
+        
+        // Draw orbital orbs
+        for (index, frequency) in frequencies.enumerated() {
+            let angle = (2 * .pi * Double(index)) / Double(frequencies.count)
+            let orbitalRadius = maxRadius * CGFloat(0.5 + frequency * 0.5)
+            let x = centerX + cos(angle) * orbitalRadius
+            let y = centerY + sin(angle) * orbitalRadius
+            let orbSize = maxRadius * 0.15 * CGFloat(frequency)
+            
+            drawGlowingOrb(at: CGPoint(x: x, y: y),
+                          radius: orbSize,
+                          color: orbColors[index % orbColors.count],
+                          in: context)
+        }
+    }
+    
+    private func drawGlowingOrb(at center: CGPoint, radius: CGFloat, color: CGColor, in context: CGContext) {
+        // Draw core
+        context.setFillColor(color)
+        context.fillEllipse(in: CGRect(x: center.x - radius, y: center.y - radius,
+                                     width: radius * 2, height: radius * 2))
+        
+        // Draw glow
+        for i in 1...3 {
+            let alpha = 0.3 / CGFloat(i)
+            context.setFillColor(color.copy(alpha: alpha)!)
+            let glowRadius = radius * CGFloat(1 + i * Int(0.5))
+            context.fillEllipse(in: CGRect(x: center.x - glowRadius, y: center.y - glowRadius,
+                                         width: glowRadius * 2, height: glowRadius * 2))
+        }
+    }
+    
+    private func addNoiseTexture(to context: CGContext) {
+        context.setFillColor(NSColor.white.withAlphaComponent(0.03).cgColor)
+        for _ in 0..<1000 {
+            let x = CGFloat.random(in: 0..<size.width)
+            let y = CGFloat.random(in: 0..<size.height)
+            context.fill(CGRect(x: x, y: y, width: 1, height: 1))
+        }
+    }
+    
+    private func applyBloomEffect(to context: CGContext) {
+        // Implement bloom effect using CIFilter
+        guard let image = context.makeImage() else { return }
+        let ciImage = CIImage(cgImage: image)
+        
+        let bloomFilter = CIFilter(name: "CIBloom")
+        bloomFilter?.setValue(ciImage, forKey: kCIInputImageKey)
+        bloomFilter?.setValue(2.5, forKey: kCIInputRadiusKey)
+        bloomFilter?.setValue(1.0, forKey: kCIInputIntensityKey)
+        
+        if let outputImage = bloomFilter?.outputImage,
+           let cgImage = ciContext.createCGImage(outputImage, from: outputImage.extent) {
+            context.draw(cgImage, in: CGRect(origin: .zero, size: size))
+        }
     }
     
     func createVideoTrack(
@@ -275,10 +320,9 @@ class AudioVisualizer {
             throw ConversionError.conversionFailed(reason: "No frames available")
         }
         
-        logger.debug("⚙️ Initializing video writer")
+        logger.debug("Initializing video writer")
         let writer = try AVAssetWriter(url: outputURL, fileType: .mp4)
         
-        // Video settings
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: firstFrame.width,
@@ -295,7 +339,6 @@ class AudioVisualizer {
         videoInput.expectsMediaDataInRealTime = false
         writer.add(videoInput)
         
-        // Add audio input if audio asset is available
         let audioInput: AVAssetWriterInput?
         if let audioAsset = audioAsset,
            let _ = try? await audioAsset.loadTracks(withMediaType: .audio).first {
@@ -325,7 +368,6 @@ class AudioVisualizer {
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
         
-        // Write video frames
         let durationInSeconds = duration.seconds
         let frameDuration = CMTime(seconds: durationInSeconds / Double(frames.count), preferredTimescale: 600)
         
@@ -333,21 +375,20 @@ class AudioVisualizer {
             let pixelBuffer = try await createPixelBuffer(from: frame)
             
             while !videoInput.isReadyForMoreMediaData {
-                try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+                try await Task.sleep(nanoseconds: 10_000_000)
             }
             
             let presentationTime = CMTimeMultiply(frameDuration, multiplier: Int32(index))
             adaptor.append(pixelBuffer, withPresentationTime: presentationTime)
             
-            progressHandler?(Double(index) / Double(frames.count) * 0.8) // 80% for video
+            progressHandler?(Double(index) / Double(frames.count) * 0.8)
         }
         
         videoInput.markAsFinished()
         
-        // Write audio if available
         if let audioInput = audioInput, let audioAsset = audioAsset {
             try await appendAudioSamples(from: audioAsset, to: audioInput)
-            progressHandler?(0.9) // 90% after audio
+            progressHandler?(0.9)
         }
         
         await writer.finishWriting()
@@ -484,68 +525,5 @@ class AudioVisualizer {
         
         audioInput.markAsFinished()
         reader.cancelReading()
-    }
-    
-    // If needed, you can implement different waveform styles in these methods.
-    // For this refined style, we've chosen the smoothed line with gradients and glow.
-    // The methods below remain as placeholders or for alternative styles if you want them later.
-    private func processWaveformChunk(
-        _ samples: ArraySlice<Float>,
-        context: CGContext,
-        samplesPerPixel: Int,
-        size: CGSize,
-        style: WaveformStyle
-    ) {
-        // Not used in this refined version. We rely on a single, smooth waveform draw.
-    }
-    
-    private func drawLineStyle(
-        _ samples: ArraySlice<Float>,
-        context: CGContext,
-        midY: CGFloat,
-        amplitudeScale: CGFloat,
-        xScale: CGFloat
-    ) {
-        // Not needed in this refined approach.
-    }
-    
-    private func drawBarsStyle(
-        _ samples: ArraySlice<Float>,
-        context: CGContext,
-        midY: CGFloat,
-        amplitudeScale: CGFloat,
-        xScale: CGFloat
-    ) {
-        // Not needed in this refined approach.
-    }
-    
-    private func drawFilledStyle(
-        _ samples: ArraySlice<Float>,
-        context: CGContext,
-        midY: CGFloat,
-        amplitudeScale: CGFloat,
-        xScale: CGFloat
-    ) {
-        // Not needed in this refined approach.
-    }
-    
-    private func drawDotsStyle(
-        _ samples: ArraySlice<Float>,
-        context: CGContext,
-        midY: CGFloat,
-        amplitudeScale: CGFloat,
-        xScale: CGFloat
-    ) {
-        // Not needed in this refined approach.
-    }
-    
-    func processWaveform(
-        samples: [Float],
-        context: CGContext,
-        size: CGSize,
-        chunkSize: Int,
-        samplesPerPixel: Int
-    ) {
-        // Not used here; we rely on the main drawWaveform method.
     }
 }
