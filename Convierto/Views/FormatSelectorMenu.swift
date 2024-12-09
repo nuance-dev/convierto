@@ -8,91 +8,75 @@ struct FormatSelectorMenu: View {
     @Environment(\.colorScheme) var colorScheme
     
     var body: some View {
-        GeometryReader { geometry in
-            VStack(spacing: 0) {
-                // Search header
-                HStack(spacing: 12) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary)
-                    
-                    TextField("Search formats...", text: .constant(""))
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 14))
-                }
-                .padding(12)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(colorScheme == .dark ? 
-                            Color.black.opacity(0.3) : 
-                            Color.white.opacity(0.8))
-                )
-                .padding(.horizontal, 16)
-                .padding(.top, 16)
-                
-                // Categories
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 20) {
-                        ForEach(supportedTypes.keys.sorted(), id: \.self) { category in
-                            VStack(alignment: .leading, spacing: 12) {
-                                // Category Header
-                                Text(category)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundColor(.secondary)
-                                    .textCase(.uppercase)
-                                    .padding(.horizontal, 16)
-                                
-                                // Format Grid
-                                LazyVGrid(columns: [
-                                    GridItem(.flexible()),
-                                    GridItem(.flexible())
-                                ], spacing: 8) {
-                                    ForEach(supportedTypes[category] ?? [], id: \.identifier) { format in
-                                        FormatButton(
-                                            format: format,
-                                            isSelected: format == selectedFormat,
-                                            action: {
-                                                withAnimation(.spring(response: 0.3)) {
-                                                    selectedFormat = format
-                                                    isPresented = false
-                                                }
-                                            }
-                                        )
-                                    }
-                                }
-                                .padding(.horizontal, 16)
-                            }
+        if isPresented {
+            ZStack {
+                // Full screen overlay background with blur
+                VisualEffectBlur(material: .hudWindow, blendingMode: .behindWindow)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.3)) {
+                            isPresented = false
                         }
                     }
-                    .padding(.vertical, 16)
+                
+                // Semi-transparent overlay
+                Color.black.opacity(0.2)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                
+                // Menu content
+                VStack(spacing: 0) {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 20) {
+                            ForEach(supportedTypes.keys.sorted(), id: \.self) { category in
+                                VStack(alignment: .leading, spacing: 12) {
+                                    // Category Header
+                                    Text(category)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                        .textCase(.uppercase)
+                                        .padding(.horizontal, 16)
+                                    
+                                    // Format Grid
+                                    LazyVGrid(columns: [
+                                        GridItem(.flexible()),
+                                        GridItem(.flexible())
+                                    ], spacing: 8) {
+                                        ForEach(supportedTypes[category] ?? [], id: \.identifier) { format in
+                                            FormatButton(
+                                                format: format,
+                                                isSelected: format == selectedFormat,
+                                                action: {
+                                                    withAnimation(.spring(response: 0.3)) {
+                                                        selectedFormat = format
+                                                        isPresented = false
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    }
+                                    .padding(.horizontal, 16)
+                                }
+                            }
+                        }
+                        .padding(.vertical, 16)
+                    }
                 }
-            }
-            .frame(width: 400, height: 500)
-            .background(
-                ZStack {
-                    VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
-                    
+                .frame(width: 400)
+                .frame(maxHeight: 500)
+                .background(
                     RoundedRectangle(cornerRadius: 20)
                         .fill(colorScheme == .dark ? 
                             Color.black.opacity(0.3) : 
                             Color.white.opacity(0.5))
-                }
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 20))
-            .shadow(color: Color.black.opacity(0.2), radius: 20, x: 0, y: 10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 20)
-                    .stroke(Color.primary.opacity(0.1), lineWidth: 1)
-            )
-            .position(
-                x: geometry.frame(in: .global).midX,
-                y: geometry.frame(in: .global).midY
-            )
-        }
-        .ignoresSafeArea()
-        .background(Color.black.opacity(0.2))
-        .onTapGesture {
-            isPresented = false
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20)
+                        .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.2), radius: 20, x: 0, y: 10)
+            }
+            .transition(.opacity)
         }
     }
 }

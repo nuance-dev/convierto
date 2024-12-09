@@ -88,78 +88,129 @@ struct OutputFormatSelector: View {
     @Environment(\.colorScheme) var colorScheme
     
     var body: some View {
-        Button {
-            withAnimation(.spring(response: 0.3)) {
-                isMenuOpen.toggle()
-            }
-        } label: {
-            HStack(spacing: 12) {
-                // Selected Format Icon
-                ZStack {
-                    Circle()
-                        .fill(Color.accentColor.opacity(0.15))
-                        .frame(width: 40, height: 40)
-                    
-                    Image(systemName: getFormatIcon(for: selectedOutputFormat))
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [.accentColor, .accentColor.opacity(0.8)],
-                                startPoint: .top,
-                                endPoint: .bottom
+        VStack(spacing: 0) {
+            // Selector Button
+            Button {
+                withAnimation(.spring(response: 0.3)) {
+                    isMenuOpen.toggle()
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    // Selected Format Icon
+                    ZStack {
+                        Circle()
+                            .fill(Color.accentColor.opacity(0.15))
+                            .frame(width: 40, height: 40)
+                        
+                        Image(systemName: getFormatIcon(for: selectedOutputFormat))
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [.accentColor, .accentColor.opacity(0.8)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
                             )
-                        )
-                }
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Convert to")
-                        .font(.system(size: 12))
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Convert to")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                        Text(selectedOutputFormat.localizedDescription ?? "Select Format")
+                            .font(.system(size: 14, weight: .medium))
+                    }
+                    
+                    Spacer()
+                    
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 12, weight: .bold))
                         .foregroundColor(.secondary)
-                    Text(selectedOutputFormat.localizedDescription ?? "Select Format")
-                        .font(.system(size: 14, weight: .medium))
+                        .rotationEffect(.degrees(isMenuOpen ? 180 : 0))
                 }
-                
-                Spacer()
-                
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(.secondary)
-                    .rotationEffect(.degrees(isMenuOpen ? 180 : 0))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(colorScheme == .dark ? 
+                                Color.black.opacity(0.3) : 
+                                Color.white.opacity(0.8))
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.accentColor.opacity(isHovered ? 0.2 : 0.1), 
+                                   lineWidth: 1)
+                    }
+                )
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(
-                ZStack {
+            .buttonStyle(.plain)
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isHovered = hovering
+                }
+            }
+            
+            // Format Menu (expands below)
+            if isMenuOpen {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(supportedTypes.keys.sorted(), id: \.self) { category in
+                            // Category Header
+                            Text(category)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .textCase(.uppercase)
+                                .padding(.horizontal, 16)
+                            
+                            // Format Grid
+                            LazyVGrid(columns: [
+                                GridItem(.flexible()),
+                                GridItem(.flexible())
+                            ], spacing: 8) {
+                                ForEach(supportedTypes[category] ?? [], id: \.identifier) { format in
+                                    FormatButton(
+                                        format: format,
+                                        isSelected: format == selectedOutputFormat,
+                                        action: {
+                                            withAnimation(.spring(response: 0.3)) {
+                                                selectedOutputFormat = format
+                                                isMenuOpen = false
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
+                    }
+                    .padding(.vertical, 16)
+                }
+                .frame(maxHeight: 300)
+                .background(
                     RoundedRectangle(cornerRadius: 16)
                         .fill(colorScheme == .dark ? 
                             Color.black.opacity(0.3) : 
                             Color.white.opacity(0.8))
+                )
+                .overlay(
                     RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.accentColor.opacity(isHovered ? 0.2 : 0.1), 
-                               lineWidth: 1)
-                }
-            )
-            .shadow(
-                color: .accentColor.opacity(isHovered ? 0.1 : 0),
-                radius: 12,
-                x: 0,
-                y: 6
-            )
-            .scaleEffect(isHovered ? 1.01 : 1.0)
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.spring(response: 0.2)) {
-                isHovered = hovering
+                        .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                )
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .overlay {
-            if isMenuOpen {
-                FormatSelectorMenu(
-                    selectedFormat: $selectedOutputFormat,
-                    supportedTypes: supportedTypes,
-                    isPresented: $isMenuOpen
-                )
+            if showError {
+                Text(errorMessage ?? "Error")
+                    .font(.system(size: 12))
+                    .foregroundColor(.red)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.red.opacity(0.1))
+                    )
+                    .offset(y: -30)
+                    .transition(.scale.combined(with: .opacity))
             }
         }
     }
@@ -176,6 +227,7 @@ struct ContentView: View {
     @State private var errorMessage: String?
     @State private var selectedOutputFormat: UTType = .jpeg
     @State private var isMultiFileMode = false
+    @State private var isFormatSelectorPresented = false
     
     private let supportedTypes: [UTType] = Array(Set([
         .jpeg, .png, .heic, .tiff, .gif, .bmp, .webP,
@@ -210,6 +262,22 @@ struct ContentView: View {
             ]
         ]
         return formats
+    }
+    
+    private var categorizedTypes: [String: [UTType]] {
+        Dictionary(grouping: supportedTypes) { type in
+            if type.conforms(to: .image) {
+                return "Images"
+            } else if type.conforms(to: .audio) {
+                return "Audio"
+            } else if type.conforms(to: .video) {
+                return "Video"
+            } else if type.conforms(to: .text) {
+                return "Documents"
+            } else {
+                return "Other"
+            }
+        }
     }
     
     var body: some View {
@@ -286,6 +354,16 @@ struct ContentView: View {
                 }
             }
             .frame(minWidth: 480, minHeight: 360)
+            
+            // Format selector overlay at root level
+            if isFormatSelectorPresented {
+                FormatSelectorMenu(
+                    selectedFormat: $selectedOutputFormat,
+                    supportedTypes: categorizedTypes,
+                    isPresented: $isFormatSelectorPresented
+                )
+                .transition(.opacity)
+            }
         }
     }
     

@@ -26,6 +26,8 @@ struct ConviertoApp: App {
                         showingUpdateSheet = true
                     }
                 }
+                .coordinateSpace(name: "window")
+                .clipShape(Rectangle())
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
