@@ -14,6 +14,11 @@ A powerful, native macOS app that intelligently converts files while maintaining
 - **Audio**: MP3, WAV, AIFF, M4A, AAC
 - **Documents**: PDF
 
+
+https://github.com/user-attachments/assets/c2dea2d9-8a25-4b5f-902a-5aeca3aafce2
+
+
+
 ### Core Features
 
 - **Smart Conversion**: Intelligent format detection and optimal conversion settings
