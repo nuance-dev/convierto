@@ -52,29 +52,23 @@ class DocumentProcessor: BaseConverter {
             try await resourcePool.checkResourceAvailability(taskId: taskId, type: .document)
             logger.debug("✅ Resource availability confirmed")
             
-            return try await withTimeout(seconds: 180) {
-                self.logger.debug("⏳ Starting conversion with 180s timeout")
-                switch strategy {
-                case .extractFrame:
-                    self.logger.debug("🖼️ Converting PDF to image")
-                    return try await self.convertPDFToImage(url, outputFormat: format, metadata: metadata, progress: progress)
-                case .createVideo:
-                    self.logger.debug("🎬 Converting PDF to video")
-                    return try await self.convertPDFToVideo(url, outputFormat: format, metadata: metadata, progress: progress)
-                case .combine:
-                    self.logger.debug("📑 Converting image to PDF")
-                    return try await self.convertImageToPDF(url, metadata: metadata, progress: progress)
-                default:
-                    self.logger.error("❌ Unsupported conversion strategy")
-                    throw ConversionError.incompatibleFormats(from: inputType, to: format)
-                }
+            switch strategy {
+            case .extractFrame:
+                logger.debug("🖼️ Converting PDF to image")
+                return try await convertPDFToImage(url, outputFormat: format, metadata: metadata, progress: progress)
+            case .combine:
+                logger.debug("📑 Converting image to PDF")
+                return try await convertImageToPDF(url, metadata: metadata, progress: progress)
+            case .createVideo:
+                logger.debug("🎬 Converting PDF to video")
+                return try await convertPDFToVideo(url, outputFormat: format, metadata: metadata, progress: progress)
+            default:
+                logger.error("❌ Invalid conversion strategy")
+                throw ConversionError.conversionFailed(reason: "Invalid conversion strategy")
             }
-        } catch let error as ConversionError {
+        } catch {
             logger.error("❌ Document conversion failed: \(error.localizedDescription)")
             throw error
-        } catch {
-            logger.error("❌ Unexpected error: \(error.localizedDescription)")
-            throw ConversionError.conversionFailed(reason: error.localizedDescription)
         }
     }
     
@@ -208,25 +202,26 @@ class DocumentProcessor: BaseConverter {
             throw ConversionError.documentProcessingFailed(reason: "Could not load image")
         }
         
+        let pdfData = NSMutableData()
+        var mediaBox = CGRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
+        
+        guard let context = CGContext(consumer: CGDataConsumer(data: pdfData)!,
+                                    mediaBox: &mediaBox,
+                                    nil) else {
+            throw ConversionError.conversionFailed(reason: "Could not create PDF context")
+        }
+        
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             throw ConversionError.conversionFailed(reason: "Could not create CGImage")
         }
         
-        let pdfData = NSMutableData()
-        var mediaBox = CGRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
-        
-        guard let pdfContext = CGContext(consumer: CGDataConsumer(data: pdfData)!,
-                                       mediaBox: &mediaBox,
-                                       nil) else {
-            throw ConversionError.conversionFailed(reason: "Could not create PDF context")
-        }
-        
-        pdfContext.beginPage(mediaBox: &mediaBox)
-        pdfContext.draw(cgImage, in: mediaBox)
-        pdfContext.endPage()
-        pdfContext.closePDF()
+        context.beginPage(mediaBox: &mediaBox)
+        context.draw(cgImage, in: mediaBox)
+        context.endPage()
+        context.closePDF()
         
         try pdfData.write(to: outputURL, options: .atomic)
+        progress.completedUnitCount = 100
         
         return ProcessingResult(
             outputURL: outputURL,
@@ -235,5 +230,25 @@ class DocumentProcessor: BaseConverter {
             fileType: .pdf,
             metadata: nil
         )
+    }
+    
+    override func validateConversion(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {
+        logger.debug("🔍 Validating conversion from \(inputType.identifier) to \(outputType.identifier)")
+        
+        switch (inputType, outputType) {
+        case (.pdf, let t) where t.conforms(to: .image):
+            return .extractFrame
+        case (let f, .pdf) where f.conforms(to: .image):
+            return .combine
+        case (.pdf, let t) where t.conforms(to: .audiovisualContent):
+            return .createVideo
+        default:
+            logger.error("❌ Unsupported conversion combination")
+            throw ConversionError.incompatibleFormats(
+                from: inputType,
+                to: outputType,
+                reason: "Unsupported conversion combination"
+            )
+        }
     }
 }
