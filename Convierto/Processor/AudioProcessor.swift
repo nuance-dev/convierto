@@ -236,6 +236,11 @@ class AudioProcessor: BaseConverter {
             return try await convertToWAV(from: asset, to: outputURL, metadata: metadata, progress: progress)
         }
         
+        // For MP3 conversion, we'll first convert to M4A then use an encoder to convert to MP3
+        if format == .mp3 {
+            return try await convertToMP3(from: asset, metadata: metadata, progress: progress)
+        }
+        
         // For other formats, use AVAssetExportSession
         let presetName = try determineAudioPreset(for: format)
         logger.debug("📝 Using preset: \(presetName)")
@@ -245,7 +250,7 @@ class AudioProcessor: BaseConverter {
         }
         
         exportSession.outputURL = outputURL
-        exportSession.outputFileType = format == .mp3 ? .mp3 : .m4a
+        exportSession.outputFileType = .m4a
         
         // Track export progress
         let progressTask = Task {
@@ -270,15 +275,152 @@ class AudioProcessor: BaseConverter {
             throw ConversionError.exportFailed(reason: error.localizedDescription)
         }
         
-        let fileExtension = format == .mp3 ? "mp3" : "m4a"
-        
         return ProcessingResult(
             outputURL: outputURL,
             originalFileName: metadata.originalFileName ?? "audio",
-            suggestedFileName: "converted_audio.\(fileExtension)",
+            suggestedFileName: "converted_audio." + (format.preferredFilenameExtension ?? "m4a"),
             fileType: format,
             metadata: metadata.toDictionary()
         )
+    }
+    
+    private func convertToMP3(
+        from asset: AVAsset,
+        metadata: ConversionMetadata,
+        progress: Progress
+    ) async throws -> ProcessingResult {
+        logger.debug("🎵 Starting MP3 conversion process")
+        
+        // First convert to M4A as intermediate format
+        let intermediateURL = try await CacheManager.shared.createTemporaryURL(for: "m4a")
+        let finalURL = try await CacheManager.shared.createTemporaryURL(for: "mp3")
+        
+        // Create export session for M4A
+        guard let exportSession = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetAppleM4A
+        ) else {
+            throw ConversionError.exportFailed(reason: "Failed to create export session")
+        }
+        
+        exportSession.outputURL = intermediateURL
+        exportSession.outputFileType = .m4a
+        
+        // Track progress for first half of conversion
+        let progressTask = Task {
+            while !Task.isCancelled {
+                await MainActor.run {
+                    let halfProgress = exportSession.progress * 0.5
+                    progress.completedUnitCount = Int64(halfProgress * 100)
+                    NotificationCenter.default.post(
+                        name: .processingProgressUpdated,
+                        object: nil,
+                        userInfo: ["progress": halfProgress]
+                    )
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        
+        await exportSession.export()
+        progressTask.cancel()
+        
+        if let error = exportSession.error {
+            logger.error("❌ M4A export failed: \(error.localizedDescription)")
+            throw ConversionError.exportFailed(reason: error.localizedDescription)
+        }
+        
+        // Now convert M4A to MP3 using AVAssetReader/Writer
+        let m4aAsset = AVAsset(url: intermediateURL)
+        try await convertM4AToMP3(m4aAsset, to: finalURL, progress: progress)
+        
+        // Clean up intermediate file
+        try? FileManager.default.removeItem(at: intermediateURL)
+        
+        return ProcessingResult(
+            outputURL: finalURL,
+            originalFileName: metadata.originalFileName ?? "audio",
+            suggestedFileName: "converted_audio.mp3",
+            fileType: .mp3,
+            metadata: metadata.toDictionary()
+        )
+    }
+    
+    private func convertM4AToMP3(
+        _ asset: AVAsset,
+        to outputURL: URL,
+        progress: Progress
+    ) async throws {
+        guard let audioTrack = try await asset.loadTracks(withMediaType: .audio).first else {
+            throw ConversionError.conversionFailed(reason: "No audio track found")
+        }
+        
+        // Create asset reader
+        guard let reader = try? AVAssetReader(asset: asset) else {
+            throw ConversionError.conversionFailed(reason: "Failed to create asset reader")
+        }
+        
+        let outputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEGLayer3,
+            AVSampleRateKey: 44100.0,
+            AVNumberOfChannelsKey: 2,
+            AVEncoderBitRateKey: settings.audioBitRate
+        ]
+        
+        let readerOutput = AVAssetReaderTrackOutput(
+            track: audioTrack,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVSampleRateKey: 44100.0,
+                AVNumberOfChannelsKey: 2
+            ]
+        )
+        
+        reader.add(readerOutput)
+        
+        // Create asset writer
+        guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .mp3) else {
+            throw ConversionError.conversionFailed(reason: "Failed to create asset writer")
+        }
+        
+        let writerInput = AVAssetWriterInput(
+            mediaType: .audio,
+            outputSettings: outputSettings
+        )
+        writer.add(writerInput)
+        
+        guard reader.startReading() else {
+            throw ConversionError.conversionFailed(reason: "Failed to start reading")
+        }
+        
+        guard writer.startWriting() else {
+            throw ConversionError.conversionFailed(reason: "Failed to start writing")
+        }
+        
+        writer.startSession(atSourceTime: .zero)
+        
+        await withCheckedContinuation { continuation in
+            writerInput.requestMediaDataWhenReady(on: DispatchQueue(label: "com.convierto.mp3conversion")) {
+                while writerInput.isReadyForMoreMediaData {
+                    if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
+                        writerInput.append(sampleBuffer)
+                    } else {
+                        writerInput.markAsFinished()
+                        continuation.resume()
+                        break
+                    }
+                }
+            }
+        }
+        
+        await writer.finishWriting()
+        
+        if writer.status == .failed {
+            throw ConversionError.conversionFailed(reason: writer.error?.localizedDescription ?? "Unknown error")
+        }
     }
     
     private func convertToWAV(
