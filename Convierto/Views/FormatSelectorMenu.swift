@@ -6,173 +6,90 @@ struct FormatSelectorMenu: View {
     let supportedTypes: [String: [UTType]]
     @Binding var isPresented: Bool
     @Environment(\.colorScheme) var colorScheme
+    @State private var searchText: String = ""
+    @FocusState private var isSearchFocused: Bool
+    
+    private var filteredTypes: [String: [UTType]] {
+        if searchText.isEmpty { return supportedTypes }
+        
+        return supportedTypes.mapValues { formats in
+            formats.filter { format in
+                let description = Self.getFormatDescription(for: format).lowercased()
+                let identifier = format.identifier.lowercased()
+                let fileExtension = format.preferredFilenameExtension?.lowercased() ?? ""
+                let searchQuery = searchText.lowercased()
+                
+                return description.contains(searchQuery) ||
+                       identifier.contains(searchQuery) ||
+                       fileExtension.contains(searchQuery)
+            }
+        }.filter { !$0.value.isEmpty }
+    }
     
     var body: some View {
-        if isPresented {
-            ZStack {
-                // Full screen overlay background with blur
-                VisualEffectBlur(material: .hudWindow, blendingMode: .behindWindow)
-                    .ignoresSafeArea()
-                    .onTapGesture {
-                        withAnimation(.spring(response: 0.3)) {
-                            isPresented = false
+        CommandPalette(isPresented: $isPresented) {
+            VStack(spacing: 0) {
+                // Search field
+                HStack(spacing: 12) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 14))
+                        .foregroundColor(.secondary)
+                    
+                    TextField("Search formats...", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14))
+                        .focused($isSearchFocused)
+                    
+                    if !searchText.isEmpty {
+                        Button(action: { searchText = "" }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                                .font(.system(size: 14))
                         }
+                        .buttonStyle(.plain)
                     }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
                 
-                // Semi-transparent overlay
-                Color.black.opacity(0.2)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
+                Divider()
                 
-                // Menu content
-                VStack(spacing: 0) {
-                    ScrollView(.vertical, showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 20) {
-                            ForEach(supportedTypes.keys.sorted(), id: \.self) { category in
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(Array(filteredTypes.keys.sorted()), id: \.self) { category in
+                            if let formats = filteredTypes[category], !formats.isEmpty {
                                 VStack(alignment: .leading, spacing: 12) {
-                                    // Category Header
                                     Text(category)
                                         .font(.system(size: 12, weight: .medium))
                                         .foregroundColor(.secondary)
-                                        .textCase(.uppercase)
                                         .padding(.horizontal, 16)
                                     
-                                    // Format Grid
-                                    LazyVGrid(columns: [
-                                        GridItem(.flexible()),
-                                        GridItem(.flexible())
-                                    ], spacing: 8) {
-                                        ForEach(supportedTypes[category] ?? [], id: \.identifier) { format in
-                                            FormatButton(
-                                                format: format,
-                                                isSelected: format == selectedFormat,
-                                                action: {
-                                                    withAnimation(.spring(response: 0.3)) {
-                                                        selectedFormat = format
-                                                        isPresented = false
-                                                    }
-                                                }
-                                            )
+                                    ForEach(formats, id: \.identifier) { format in
+                                        FormatButton(
+                                            format: format,
+                                            isSelected: format == selectedFormat
+                                        ) {
+                                            withAnimation(.spring(response: 0.3)) {
+                                                selectedFormat = format
+                                                isPresented = false
+                                            }
                                         }
+                                        .padding(.horizontal, 16)
                                     }
-                                    .padding(.horizontal, 16)
                                 }
                             }
                         }
-                        .padding(.vertical, 16)
                     }
-                }
-                .frame(width: 400)
-                .frame(maxHeight: 500)
-                .background(
-                    RoundedRectangle(cornerRadius: 20)
-                        .fill(colorScheme == .dark ? 
-                            Color.black.opacity(0.3) : 
-                            Color.white.opacity(0.5))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20)
-                        .stroke(Color.primary.opacity(0.1), lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.2), radius: 20, x: 0, y: 10)
-            }
-            .transition(.opacity)
-        }
-    }
-}
-
-struct FormatButton: View {
-    let format: UTType
-    let isSelected: Bool
-    let action: () -> Void
-    @Environment(\.colorScheme) var colorScheme
-    @State private var isHovered = false
-    
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                // Format Icon
-                ZStack {
-                    Circle()
-                        .fill(isSelected ? 
-                            Color.accentColor.opacity(0.15) : 
-                            Color.secondary.opacity(0.1))
-                        .frame(width: 36, height: 36)
-                    
-                    Image(systemName: getFormatIcon(for: format))
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(
-                            isSelected ? 
-                                Color.accentColor : 
-                                Color.primary.opacity(0.8)
-                        )
-                }
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(format.localizedDescription ?? format.identifier)
-                        .font(.system(size: 13, weight: .medium))
-                    
-                    Text(getFormatDescription(for: format))
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
-                
-                Spacer()
-                
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(.accentColor)
+                    .padding(.vertical, 16)
                 }
             }
-            .padding(12)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(isHovered ? 
-                        (colorScheme == .dark ? 
-                            Color.white.opacity(0.05) : 
-                            Color.black.opacity(0.05)) : 
-                        Color.clear)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(
-                        isSelected ? 
-                            Color.accentColor.opacity(0.2) : 
-                            Color.clear,
-                        lineWidth: 1
-                    )
-            )
         }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.2)) {
-                isHovered = hovering
-            }
+        .onAppear {
+            isSearchFocused = true
         }
     }
-}
-
-struct VisualEffectView: NSViewRepresentable {
-    let material: NSVisualEffectView.Material
-    let blendingMode: NSVisualEffectView.BlendingMode
     
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let visualEffectView = NSVisualEffectView()
-        visualEffectView.material = material
-        visualEffectView.blendingMode = blendingMode
-        visualEffectView.state = .active
-        return visualEffectView
-    }
-    
-    func updateNSView(_ visualEffectView: NSVisualEffectView, context: Context) {
-        visualEffectView.material = material
-        visualEffectView.blendingMode = blendingMode
-    }
-}
-
-extension FormatSelectorMenu {
     static func getFormatDescription(for format: UTType) -> String {
         switch format {
         case .jpeg:
@@ -243,12 +160,20 @@ extension FormatSelectorMenu {
     }
 }
 
-extension FormatButton {
-    func getFormatDescription(for format: UTType) -> String {
-        FormatSelectorMenu.getFormatDescription(for: format)
+struct VisualEffectView: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+    let blendingMode: NSVisualEffectView.BlendingMode
+    
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let visualEffectView = NSVisualEffectView()
+        visualEffectView.material = material
+        visualEffectView.blendingMode = blendingMode
+        visualEffectView.state = .active
+        return visualEffectView
     }
     
-    func getFormatIcon(for format: UTType) -> String {
-        FormatSelectorMenu.getFormatIcon(for: format)
+    func updateNSView(_ visualEffectView: NSVisualEffectView, context: Context) {
+        visualEffectView.material = material
+        visualEffectView.blendingMode = blendingMode
     }
 } 

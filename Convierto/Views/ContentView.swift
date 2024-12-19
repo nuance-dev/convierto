@@ -228,6 +228,7 @@ struct ContentView: View {
     @State private var selectedOutputFormat: UTType = .jpeg
     @State private var isMultiFileMode = false
     @State private var isFormatSelectorPresented = false
+    @Environment(\.colorScheme) private var colorScheme
     
     private let supportedTypes: [UTType] = Array(Set([
         .jpeg, .png, .heic, .tiff, .gif, .bmp, .webP,
@@ -235,6 +236,15 @@ struct ContentView: View {
         .mp3, .wav, .aiff, .m4a, .aac,
         .pdf
     ])).sorted { $0.identifier < $1.identifier }
+    
+    private var supportedFormats: [String: [UTType]] {
+        [
+            "Images": [.jpeg, .png, .heic, .tiff, .gif, .bmp, .webP],
+            "Videos": [.mpeg4Movie, .quickTimeMovie, .avi],
+            "Audio": [.mp3, .wav, .aiff, .m4a, .aac],
+            "Documents": [.pdf]
+        ]
+    }
     
     private func supportedFormats(for operation: String) -> [String: [UTType]] {
         let formats: [String: [UTType]] = [
@@ -365,6 +375,28 @@ struct ContentView: View {
                 .transition(.opacity)
             }
         }
+        .onDrop(
+            of: [.fileURL],
+            delegate: FileDropDelegate(
+                isDragging: $isDragging,
+                supportedTypes: supportedTypes,
+                handleDrop: handleFilesSelected
+            )
+        )
+        .onChange(of: selectedOutputFormat) { newFormat in
+            processor.selectedOutputFormat = newFormat
+        }
+        // Add keyboard shortcut for format selector
+        .keyboardShortcut("k", modifiers: [.command])
+        .onAppear {
+            NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "k" {
+                    isFormatSelectorPresented.toggle()
+                    return nil
+                }
+                return event
+            }
+        }
     }
     
     @MainActor
@@ -421,6 +453,49 @@ struct ContentView: View {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     errorMessage = error.localizedDescription
                     showError = true
+                }
+            }
+        }
+    }
+    
+    private func resetState() {
+        processor.clearFiles {
+            showError = false
+            errorMessage = nil
+        }
+    }
+    
+    private func shareResult(_ url: URL) {
+        let picker = NSSavePanel()
+        picker.nameFieldStringValue = url.lastPathComponent
+        
+        Task { @MainActor in
+            guard let window = NSApp.windows.first else { return }
+            let response = await picker.beginSheetModal(for: window)
+            
+            if response == .OK, let saveURL = picker.url {
+                do {
+                    try FileManager.default.copyItem(at: url, to: saveURL)
+                } catch {
+                    showError = true
+                    errorMessage = "Failed to save file: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+    
+    private func handleFilesSelected(_ providers: [NSItemProvider]) {
+        Task {
+            do {
+                let handler = FileDropHandler()
+                let urls = try await handler.handleProviders(providers, outputFormat: selectedOutputFormat)
+                await handleSelectedFiles(urls)
+            } catch {
+                await MainActor.run {
+                    withAnimation {
+                        errorMessage = error.localizedDescription
+                        showError = true
+                    }
                 }
             }
         }

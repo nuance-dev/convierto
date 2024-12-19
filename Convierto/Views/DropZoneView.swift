@@ -213,6 +213,38 @@ private struct DropZoneContent: View {
                     )
                 }
             }
+            
+            if !isDragging && !showError {
+                HStack(spacing: 4) {
+                    Text("Press")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary.opacity(0.7))
+                    
+                    HStack(spacing: 2) {
+                        Text("⌘")
+                            .font(.system(size: 11, weight: .medium))
+                        Text("K")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.secondary.opacity(0.08))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.secondary.opacity(0.1), lineWidth: 0.5)
+                            )
+                    )
+                    
+                    Text("to browse formats")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+                .padding(.top, 8)
+                .opacity(0.8)
+                .transition(.opacity)
+            }
         }
     }
 }
