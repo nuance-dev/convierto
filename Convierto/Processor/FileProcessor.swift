@@ -398,6 +398,12 @@ class FileProcessor: ObservableObject {
         logger.debug("📄 Input: \(input.identifier)")
         logger.debug("🎯 Output: \(output.identifier)")
         
+        // For audio-to-audio conversion
+        if input.conforms(to: .audio) && output.conforms(to: .audio) {
+            logger.debug("✅ Audio to audio conversion validated")
+            return
+        }
+        
         // Validate audio to video conversion
         if input.conforms(to: .audio) && output.conforms(to: .audiovisualContent) {
             guard output == .mpeg4Movie else {

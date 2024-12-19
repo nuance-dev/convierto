@@ -50,26 +50,22 @@ class BaseConverter: MediaConverting {
     func getAVFileType(for format: UTType) -> AVFileType {
         logger.debug("Determining AVFileType for format: \(format.identifier)")
         
-        let fileType: AVFileType = {
-            switch format {
-            case .mpeg4Movie:
-                return .mp4 // Standard MP4 container
-            case .quickTimeMovie:
-                return .mov // Apple QuickTime format
-            case .mp3:
-                return .mp3 // MPEG Layer-3 Audio
-            case .wav:
-                return .wav // Waveform Audio
-            case .m4a, .aac, .mpeg4Audio:
-                return .m4a // MPEG-4 Audio
-            default:
-                logger.warning("Unknown format, defaulting to MP4: \(format.identifier)")
-                return .mp4
-            }
-        }()
-        
-        logger.debug("Selected AVFileType: \(fileType.rawValue)")
-        return fileType
+        switch format {
+        case _ where format == .mp3:
+            return .mp3
+        case _ where format == .wav || format.identifier == "com.microsoft.waveform-audio":
+            return .wav
+        case _ where format == .m4a || format.identifier == "public.mpeg-4-audio":
+            return .m4a
+        case _ where format == .aac:
+            return .m4a  // AAC is typically contained in M4A
+        case _ where format.conforms(to: .audio):
+            logger.debug("⚠️ Generic audio format, defaulting to M4A")
+            return .m4a
+        default:
+            logger.debug("⚠️ Unknown format, defaulting to MP4: \(format.identifier)")
+            return .mp4
+        }
     }
     
     func createExportSession(

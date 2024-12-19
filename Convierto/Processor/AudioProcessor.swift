@@ -52,14 +52,18 @@ class AudioProcessor: BaseConverter {
     }
     
     override func canConvert(from: UTType, to: UTType) -> Bool {
-        switch (from, to) {
-        case (let f, _) where f.conforms(to: .audio):
+        // Audio to audio - check both conform to audio type
+        if from.conforms(to: .audio) && to.conforms(to: .audio) {
             return true
-        case (_, let t) where t.conforms(to: .image) || t.conforms(to: .audiovisualContent):
-            return true
-        default:
-            return false
         }
+        
+        // Audio to video/image (visualization)
+        if from.conforms(to: .audio) && 
+           (to.conforms(to: .audiovisualContent) || to.conforms(to: .image)) {
+            return true
+        }
+        
+        return false
     }
     
     override func convert(_ url: URL, to format: UTType, metadata: ConversionMetadata, progress: Progress) async throws -> ProcessingResult {
@@ -70,6 +74,7 @@ class AudioProcessor: BaseConverter {
         logger.debug("🎯 Target format: \(format.identifier)")
         
         do {
+            // Validate input file exists
             guard FileManager.default.fileExists(atPath: url.path) else {
                 throw ConversionError.invalidInput
             }
@@ -79,6 +84,7 @@ class AudioProcessor: BaseConverter {
             
             return try await withThrowingTaskGroup(of: ProcessingResult.self) { group in
                 let result = try await group.addTask {
+                    // Acquire resource lock
                     await self.resourcePool.beginTask(id: taskId, type: .audio)
                     defer {
                         Task {
@@ -109,6 +115,7 @@ class AudioProcessor: BaseConverter {
                     
                     await self.updateConversionStage(.optimizing)
                     
+                    // Validate output exists
                     guard FileManager.default.fileExists(atPath: conversionResult.outputURL.path) else {
                         throw ConversionError.exportFailed(reason: "Output file not found")
                     }
@@ -149,31 +156,22 @@ class AudioProcessor: BaseConverter {
     private func determineConversionStrategy(from asset: AVAsset, to format: UTType) async throws -> ConversionStrategy {
         logger.debug("Determining conversion strategy for format: \(format.identifier)")
         
-        let strategy: ConversionStrategy
+        // Verify the asset has audio tracks
+        guard try await asset.loadTracks(withMediaType: .audio).first != nil else {
+            throw ConversionError.invalidInput
+        }
         
-        switch format {
-        case _ where format.conforms(to: .audiovisualContent):
-            logger.debug("Selected visualization strategy for audiovisual content")
-            strategy = .visualize
-            
-        case _ where format.conforms(to: .image):
-            logger.debug("Selected visualization strategy for image output")
-            strategy = .visualize
-            
-        case _ where format.conforms(to: .audio):
+        if format.conforms(to: .audio) {
             logger.debug("Selected direct conversion strategy for audio output")
-            strategy = .direct
-            
-        default:
-            logger.error("No suitable conversion strategy found")
-            throw ConversionError.incompatibleFormats(from: .audio, to: format)
+            return .direct
         }
         
-        guard await checkStrategySupport(strategy) else {
-            throw ConversionError.unsupportedConversion("Strategy \(strategy) is not supported")
+        if format.conforms(to: .audiovisualContent) || format.conforms(to: .image) {
+            logger.debug("Selected visualization strategy")
+            return .visualize
         }
         
-        return strategy
+        throw ConversionError.unsupportedConversion("Unsupported output format: \(format.identifier)")
     }
     
     private func executeConversion(
@@ -231,20 +229,53 @@ class AudioProcessor: BaseConverter {
         metadata: ConversionMetadata,
         progress: Progress
     ) async throws -> ProcessingResult {
-        logger.debug("Converting audio format")
+        logger.debug("🎵 Converting audio format to \(format.identifier)")
         
-        guard let exportSession = AVAssetExportSession(asset: asset, presetName: settings.videoQuality) else {
+        // Select appropriate preset based on format
+        let presetName = try determineAudioPreset(for: format)
+        logger.debug("📝 Using preset: \(presetName)")
+        
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: presetName) else {
             throw ConversionError.exportFailed(reason: "Failed to create export session")
         }
         
+        let fileType = getAVFileType(for: format)
+        logger.debug("📄 Using file type: \(fileType.rawValue)")
+        
         exportSession.outputURL = outputURL
-        exportSession.outputFileType = getAVFileType(for: format)
+        exportSession.outputFileType = fileType
         
-        await exportSession.export()
-        
-        guard exportSession.status == .completed else {
-            throw ConversionError.exportFailed(reason: "Audio export failed")
+        // Configure audio settings if needed
+        if format == .wav {
+            exportSession.audioTimePitchAlgorithm = .spectral
         }
+        
+        // Track export progress
+        let progressTask = Task {
+            while !Task.isCancelled {
+                await MainActor.run {
+                    progress.completedUnitCount = Int64(exportSession.progress * 100)
+                    NotificationCenter.default.post(
+                        name: .processingProgressUpdated,
+                        object: nil,
+                        userInfo: ["progress": exportSession.progress]
+                    )
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            }
+        }
+        
+        logger.debug("▶️ Starting export")
+        await exportSession.export()
+        progressTask.cancel()
+        
+        if exportSession.status != .completed {
+            let error = exportSession.error?.localizedDescription ?? "Unknown error"
+            logger.error("❌ Export failed: \(error)")
+            throw ConversionError.exportFailed(reason: error)
+        }
+        
+        logger.debug("✅ Export completed successfully")
         
         return ProcessingResult(
             outputURL: outputURL,
@@ -253,6 +284,36 @@ class AudioProcessor: BaseConverter {
             fileType: format,
             metadata: metadata.toDictionary()
         )
+    }
+    
+    private func determineAudioPreset(for format: UTType) throws -> String {
+        switch format {
+        case _ where format == .mp3 || format == .m4a || format.identifier.contains("mpeg-4-audio"):
+            return AVAssetExportPresetAppleM4A
+        case _ where format == .wav || format.identifier == "com.microsoft.waveform-audio":
+            return AVAssetExportPresetPassthrough
+        case _ where format == .aac || format.identifier == "public.aac-audio":
+            return AVAssetExportPresetAppleM4A
+        case _ where format.conforms(to: .audio):
+            logger.debug("⚠️ Generic audio format, using M4A preset")
+            return AVAssetExportPresetAppleM4A
+        default:
+            throw ConversionError.unsupportedConversion("Unsupported audio format: \(format.identifier)")
+        }
+    }
+    
+    override func getAVFileType(for format: UTType) -> AVFileType {
+        switch format {
+        case _ where format == .mp3 || format == .m4a || format.identifier.contains("mpeg-4-audio"):
+            return .m4a
+        case _ where format == .wav || format.identifier == "com.microsoft.waveform-audio":
+            return .wav
+        case _ where format == .aac:
+            return .m4a
+        default:
+            logger.debug("⚠️ Unknown format, defaulting to M4A: \(format.identifier)")
+            return .m4a
+        }
     }
     
     private func createVisualizedVideo(
@@ -429,21 +490,32 @@ class AudioProcessor: BaseConverter {
     }
     
     override func validateConversion(from inputType: UTType, to outputType: UTType) throws -> ConversionStrategy {
-        guard canConvert(from: inputType, to: outputType) else {
-            throw ConversionError.incompatibleFormats(from: inputType, to: outputType)
+        logger.debug("🔍 Validating conversion from \(inputType.identifier) to \(outputType.identifier)")
+        
+        // Both types must be audio for direct conversion
+        guard inputType.conforms(to: .audio) else {
+            throw ConversionError.incompatibleFormats(
+                from: inputType,
+                to: outputType,
+                reason: "Input format is not audio"
+            )
         }
         
-        if inputType.conforms(to: .audio) {
-            if outputType.conforms(to: .audiovisualContent) {
-                return .visualize
-            } else if outputType.conforms(to: .image) {
-                return .visualize
-            } else if outputType.conforms(to: .audio) {
-                return .direct
-            }
+        if outputType.conforms(to: .audio) {
+            logger.debug("✅ Audio to audio conversion validated")
+            return .direct
         }
         
-        throw ConversionError.incompatibleFormats(from: inputType, to: outputType)
+        if outputType.conforms(to: .audiovisualContent) || outputType.conforms(to: .image) {
+            logger.debug("✅ Audio visualization conversion validated")
+            return .visualize
+        }
+        
+        throw ConversionError.incompatibleFormats(
+            from: inputType,
+            to: outputType,
+            reason: "Unsupported conversion"
+        )
     }
     
     private func checkStrategySupport(_ strategy: ConversionStrategy) -> Bool {
