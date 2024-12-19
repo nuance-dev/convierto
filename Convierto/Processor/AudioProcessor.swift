@@ -231,7 +231,12 @@ class AudioProcessor: BaseConverter {
     ) async throws -> ProcessingResult {
         logger.debug("🎵 Converting audio format to \(format.identifier)")
         
-        // Select appropriate preset based on format
+        if format == .wav || format.identifier == "com.microsoft.waveform-audio" {
+            // Use AVAssetWriter for WAV conversion
+            return try await convertToWAV(from: asset, to: outputURL, metadata: metadata, progress: progress)
+        }
+        
+        // For other formats, use AVAssetExportSession
         let presetName = try determineAudioPreset(for: format)
         logger.debug("📝 Using preset: \(presetName)")
         
@@ -239,16 +244,8 @@ class AudioProcessor: BaseConverter {
             throw ConversionError.exportFailed(reason: "Failed to create export session")
         }
         
-        let fileType = getAVFileType(for: format)
-        logger.debug("📄 Using file type: \(fileType.rawValue)")
-        
         exportSession.outputURL = outputURL
-        exportSession.outputFileType = fileType
-        
-        // Configure audio settings if needed
-        if format == .wav {
-            exportSession.audioTimePitchAlgorithm = .spectral
-        }
+        exportSession.outputFileType = format == .mp3 ? .mp3 : .m4a
         
         // Track export progress
         let progressTask = Task {
@@ -261,53 +258,162 @@ class AudioProcessor: BaseConverter {
                         userInfo: ["progress": exportSession.progress]
                     )
                 }
-                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
         
-        logger.debug("▶️ Starting export")
         await exportSession.export()
         progressTask.cancel()
         
-        if exportSession.status != .completed {
-            let error = exportSession.error?.localizedDescription ?? "Unknown error"
-            logger.error("❌ Export failed: \(error)")
-            throw ConversionError.exportFailed(reason: error)
+        if let error = exportSession.error {
+            logger.error("❌ Export failed: \(error.localizedDescription)")
+            throw ConversionError.exportFailed(reason: error.localizedDescription)
         }
         
-        logger.debug("✅ Export completed successfully")
+        let fileExtension = format == .mp3 ? "mp3" : "m4a"
         
         return ProcessingResult(
             outputURL: outputURL,
             originalFileName: metadata.originalFileName ?? "audio",
-            suggestedFileName: "converted_audio." + (format.preferredFilenameExtension ?? "m4a"),
+            suggestedFileName: "converted_audio.\(fileExtension)",
             fileType: format,
+            metadata: metadata.toDictionary()
+        )
+    }
+    
+    private func convertToWAV(
+        from asset: AVAsset,
+        to outputURL: URL,
+        metadata: ConversionMetadata,
+        progress: Progress
+    ) async throws -> ProcessingResult {
+        logger.debug("🎵 Converting to WAV format")
+        
+        // Get the audio track
+        guard let audioTrack = try await asset.loadTracks(withMediaType: .audio).first else {
+            throw ConversionError.conversionFailed(reason: "No audio track found")
+        }
+        
+        // Create asset reader
+        guard let reader = try? AVAssetReader(asset: asset) else {
+            throw ConversionError.conversionFailed(reason: "Failed to create asset reader")
+        }
+        
+        // Configure output settings for WAV
+        let outputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 44100.0,
+            AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        
+        let readerOutput = AVAssetReaderTrackOutput(
+            track: audioTrack,
+            outputSettings: outputSettings
+        )
+        reader.add(readerOutput)
+        
+        // Create asset writer
+        guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .wav) else {
+            throw ConversionError.conversionFailed(reason: "Failed to create asset writer")
+        }
+        
+        // Configure writer input
+        let writerInput = AVAssetWriterInput(
+            mediaType: .audio,
+            outputSettings: outputSettings
+        )
+        writer.add(writerInput)
+        
+        // Start reading/writing
+        guard reader.startReading() else {
+            throw ConversionError.conversionFailed(reason: "Failed to start reading")
+        }
+        
+        guard writer.startWriting() else {
+            throw ConversionError.conversionFailed(reason: "Failed to start writing")
+        }
+        
+        writer.startSession(atSourceTime: .zero)
+        
+        // Process audio samples
+        while reader.status == .reading {
+            if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
+                if writerInput.isReadyForMoreMediaData {
+                    writerInput.append(sampleBuffer)
+                } else {
+                    try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+                }
+            } else {
+                writerInput.markAsFinished()
+                break
+            }
+        }
+        
+        // Finish writing
+        await writer.finishWriting()
+        
+        if writer.status == .failed {
+            throw ConversionError.conversionFailed(reason: writer.error?.localizedDescription ?? "Unknown error")
+        }
+        
+        return ProcessingResult(
+            outputURL: outputURL,
+            originalFileName: metadata.originalFileName ?? "audio",
+            suggestedFileName: "converted_audio.wav",
+            fileType: .wav,
             metadata: metadata.toDictionary()
         )
     }
     
     private func determineAudioPreset(for format: UTType) throws -> String {
         switch format {
-        case _ where format == .mp3 || format == .m4a || format.identifier.contains("mpeg-4-audio"):
-            return AVAssetExportPresetAppleM4A
         case _ where format == .wav || format.identifier == "com.microsoft.waveform-audio":
-            return AVAssetExportPresetPassthrough
-        case _ where format == .aac || format.identifier == "public.aac-audio":
+            return AVAssetExportPresetAppleM4A // Use M4A preset for WAV conversion
+        case _ where format == .mp3:
+            return AVAssetExportPresetAppleM4A
+        case _ where format == .m4a:
             return AVAssetExportPresetAppleM4A
         case _ where format.conforms(to: .audio):
-            logger.debug("⚠️ Generic audio format, using M4A preset")
-            return AVAssetExportPresetAppleM4A
+            logger.debug("⚠️ Generic audio format, using highest quality preset")
+            return AVAssetExportPresetHighestQuality
         default:
             throw ConversionError.unsupportedConversion("Unsupported audio format: \(format.identifier)")
         }
     }
     
+    private func getAudioSettings(for format: UTType) -> [String: Any] {
+        switch format {
+        case _ where format == .wav:
+            return [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVSampleRateKey: 44100.0,
+                AVNumberOfChannelsKey: 2
+            ]
+        default:
+            return [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 44100.0,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: settings.audioBitRate
+            ]
+        }
+    }
+    
     override func getAVFileType(for format: UTType) -> AVFileType {
         switch format {
-        case _ where format == .mp3 || format == .m4a || format.identifier.contains("mpeg-4-audio"):
-            return .m4a
         case _ where format == .wav || format.identifier == "com.microsoft.waveform-audio":
             return .wav
+        case _ where format == .mp3:
+            return .mp3
+        case _ where format == .m4a:
+            return .m4a
         case _ where format == .aac:
             return .m4a
         default:
